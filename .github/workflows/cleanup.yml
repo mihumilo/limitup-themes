@@ -1,0 +1,68 @@
+name: 次日清理历史 JSON
+
+on:
+  schedule:
+    # 北京时间 09:00（周一至周五）—— 删掉昨天及更早的产物，只留最新
+    - cron: '0 1 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      keep_days:
+        description: '保留最近 N 天（0 = 只保留今天，即删除全部历史；填 30 = 保留一个月）'
+        required: false
+        default: '0'
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    env:
+      GITEE_USER: ${{ secrets.GITEE_USER }}
+      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 删除过期 JSON
+        run: |
+          KEEP="${{ github.event.inputs.keep_days }}"
+          if [ -z "$KEEP" ]; then KEEP=0; fi
+          TODAY=$(TZ=Asia/Shanghai date +%Y%m%d)
+          CUTOFF=$(TZ=Asia/Shanghai date -d "$TODAY -$KEEP days" +%Y%m%d)
+          echo "今天=$TODAY  保留天数=$KEEP  删除早于 $CUTOFF 的 JSON"
+          DEL=0
+          for f in themes/*.json review/*.json; do
+            [ -e "$f" ] || continue
+            b=$(basename "$f" .json)
+            case "$b" in
+              [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+              *) continue ;;
+            esac
+            if [ "$b" -lt "$CUTOFF" ]; then
+              rm -f "$f"
+              DEL=$((DEL+1))
+            fi
+          done
+          echo "已删除 $DEL 个文件"
+          echo "剩余: themes=$(ls themes/*.json 2>/dev/null | wc -l) review=$(ls review/*.json 2>/dev/null | wc -l)"
+
+      - name: 提交删除结果
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A themes review
+          if git diff --cached --quiet; then
+            echo "无变化"
+          else
+            git commit -m "chore: 清理过期 JSON $(TZ=Asia/Shanghai date +%Y-%m-%d)"
+            git push
+          fi
+
+      # 与 Gitee 镜像保持一致（未配 Secrets 则自动跳过）
+      - name: 同步删除到 Gitee 镜像
+        if: env.GITEE_TOKEN != '' && env.GITEE_USER != ''
+        run: |
+          git remote remove gitee 2>/dev/null || true
+          git remote add gitee "https://${GITEE_USER}:${GITEE_TOKEN}@gitee.com/${GITEE_USER}/limitup-themes.git"
+          git push gitee HEAD:main --force || echo "Gitee 同步失败（不影响主流程）"
