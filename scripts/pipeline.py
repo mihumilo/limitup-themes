@@ -49,6 +49,20 @@ POOL_FIELDS = ('199112,10,9001,330323,330324,330325,9002,330329,'
 SEG, OVERLAP = 900, 150          # 切片高度 / 重叠，保证跨切片的行不被切断
 ROW_TOL = 38                     # 同一表格行的 y 容差
 ROW_H = 240                      # 首/末行的行高上限（行区间由相邻代码中点切分得出）
+
+# 历史官方主题词表（来自 2026-09 各日复盘图）。用途：
+#   ① 救回被 OCR 切碎/变形的标题（如「大消费*10」被切成两块）
+#   ② 拒绝中央区域里长得像标题的杂质（如原因文本里的「业绩增长」）
+# 新主题（词表没有的）仍可通过 TITLE_RE 正则识别，不会被误杀。
+KNOWN_THEMES = [
+    '算力/半导体产业链', '大消费', '电力/风电', 'AI应用', '光通信', '地产产业链',
+    '玻璃/LED', '机器人', '医药', '并购重组', '次新股', '高端装备', '其他概念',
+    'PCB产业链', '锂电池', '消费电子', '海峡两岸', '炭黑', 'MLCC', '风电/电力',
+    '固态电池', 'MLCC/电容', 'AI应用/网络安全', '光通信/铜缆', '汽车/机器人产业链',
+    '汽车产业链', '磷化工/化肥', '大农业', '大金融', '军工/航天', '煤炭/煤化工',
+    '控制权变更', '被动元件', '无人驾驶', '数字货币', '有色金属', '光伏玻璃',
+    '液冷', '电力', '军工', '卫星', '煤炭', '燃气', '化工', '航运', '油气', '养猪',
+]
 NAME_ABOVE = 60                  # 名称在代码上方多少像素内
 NAME_DX = 150                    # 名称与代码的水平距离上限
 
@@ -335,15 +349,22 @@ def load_ocr(date):
 
 # ---------------------------------------------------------------- 解析
 def dedupe_items(items):
-    """重叠切片会让同一段文字被识别两次（全局 y 几乎相同）→ 按 (文本, y//25, x//25) 去重"""
-    seen, out = set(), []
-    for it in sorted(items, key=lambda r: (r[2], r[3])):
-        f, si, y, x, t = it
-        k = (t, int(y) // 25, int(x) // 25)
-        if k in seen:
-            continue
-        seen.add(k)
-        out.append(it)
+    """重叠切片会让同一段文字被识别两次。按文本分桶，y/x 接近的视为同一次识别。
+    阈值放宽到 80/40：切片边缘的 OCR 框常有十几像素抖动，之前 25px 阈值漏掉了部分重复。"""
+    buckets = {}
+    for it in sorted(items, key=lambda r: (r[4], r[2], r[3])):
+        lst = buckets.setdefault(it[4], [])
+        dup = False
+        for k in lst:
+            if abs(k[2] - it[2]) < 80 and abs(k[3] - it[3]) < 40:
+                dup = True
+                break
+        if not dup:
+            lst.append(it)
+    out = []
+    for lst in buckets.values():
+        out.extend(lst)
+    out.sort(key=lambda r: (r[2], r[3]))
     return out
 
 
@@ -360,6 +381,38 @@ def column_profile(items):
     st = [it for it in items if STREAK_RE.match(it[4].replace(' ', ''))]
     return {'time': med(ts), 'amount': med(am), 'streak': med(st),
             'n_time': len(ts), 'n_amount': len(am), 'n_streak': len(st)}
+
+
+def _norm_theme(s):
+    return re.sub(r'[\s\*＊✱x×X·•・:：,，。、/／]+', '', str(s or ''))
+
+
+def _editdist(a, b):
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+def theme_prior(s):
+    """与历史官方主题名匹配：2=精确 1=近似（前缀/编辑距离≤1） 0=不匹配"""
+    n = _norm_theme(s)
+    if len(n) < 2:
+        return 0
+    knowns = [_norm_theme(k) for k in KNOWN_THEMES]
+    if n in knowns:
+        return 2
+    for k in knowns:
+        if min(len(n), len(k)) >= 2 and abs(len(n) - len(k)) <= 2 \
+                and (n.startswith(k) or k.startswith(n)):
+            return 1
+    for k in knowns:
+        if len(n) >= 4 and abs(len(n) - len(k)) <= 1 and _editdist(n, k) <= 1:
+            return 1
+    return 0
 
 
 def classify(items, width=1921):
@@ -409,23 +462,55 @@ def classify(items, width=1921):
     else:
         keywords = []
 
-    # 标题兜底：OCR 常把「大消费*10」切成「大消费」+「*10」两块。
-    # 漏掉标题 == 该主题的股票会被并进上一个主题（归属错乱的元凶），
-    # 这里把中央区域内「短中文 + 紧邻的 1~3 位数字」合并救回来。
+    # ---- 标题兜底（rescue）：标题被 OCR 切碎时（如「大消费」+「*10」分成两块），
+    #      在中央区域找与历史官方主题名匹配的短中文块救回来。三个硬条件防误判：
+    #      ① 行独占：±60px 内没有任何 6 位代码。原因列里出现的「大消费」「业绩增长」
+    #         都长在股票行上 → 被这条全部排除（上一版标题 y 错位、归属乱串的元凶）
+    #      ② 先验匹配：名称必须命中历史官方主题词表（精确/前缀/编辑距离≤1）
+    #      ③ 居中：块中心 x 在图宽 35%~65%（真标题文字居中，≈图宽一半）
+    import bisect
+    code_ys = sorted(c['y'] for c in codes)
+
+    def on_stock_row(y):
+        i = bisect.bisect_left(code_ys, y - 60)
+        return i < len(code_ys) and code_ys[i] <= y + 60
+
+    rx0, rx1 = width * 0.35, width * 0.65
     for n in names:
-        if not (cx0 <= n['x'] <= cx1) or not (2 <= len(n['v']) <= 14):
+        if not (rx0 <= n['x'] <= rx1) or not (2 <= len(n['v']) <= 14):
             continue
-        if any(t['name'] == n['v'] for t in titles):
+        if theme_prior(n['v']) < 1:
             continue
+        if on_stock_row(n['y']):
+            continue
+        if any(_norm_theme(t['name']) == _norm_theme(n['v']) for t in titles):
+            continue
+        declare = 0
         for it in items:
-            f, si, y, x, t = it
-            s = t.replace(' ', '').lstrip('*＊✱x×X·•')
-            if not (NUM13_RE.match(s) and cx0 <= x <= cx1):
+            s = it[4].replace(' ', '').lstrip('*＊✱x×X·•・')
+            if not (NUM13_RE.match(s) and rx0 <= it[3] <= rx1):
                 continue
-            if abs(y - n['y']) > 30 or not (0 < x - n['x'] <= 110):
-                continue
-            titles.append({'y': n['y'], 'x': n['x'], 'name': n['v'], 'declare': int(s)})
-            break
+            if abs(it[2] - n['y']) <= 30 and 0 < it[3] - n['x'] <= 110:
+                declare = int(s)
+                break
+        titles.append({'y': n['y'], 'x': n['x'], 'name': n['v'],
+                       'declare': declare, 'src': 'rescue'})
+
+    # ---- 标题统一清理（strict / rescue 都要过）：居中 + 行独占 + 同名去重 ----
+    tx0, tx1 = width * 0.30, width * 0.70
+    cleaned, seen_t = [], set()
+    for t in titles:
+        if not (tx0 <= t['x'] <= tx1):
+            continue
+        if on_stock_row(t['y']):
+            continue
+        k = _norm_theme(t['name'])
+        if not k or k in seen_t:
+            continue
+        seen_t.add(k)
+        t.setdefault('src', 'strict')
+        cleaned.append(t)
+    titles = cleaned
     return titles, codes, times, streaks, keywords, names, amounts, prof
 
 
@@ -459,6 +544,9 @@ def parse_rows(items, pool=None, width=1921):
     codes.sort(key=lambda c: (c['y'], c['x']))
     print('  列定位：时间x=%s 成交额x=%s 连板x=%s ｜ 标题 %d 个 / 代码 %d 个'
           % (prof['time'], prof['amount'], prof['streak'], len(titles), len(codes)))
+    print('  标题清单：%s' % '；'.join(
+        '%s[y=%d,%s,图注%d]' % (t['name'], t['y'], t.get('src', '?'), t.get('declare', 0))
+        for t in titles))
 
     # 以代码为行锚点，用相邻锚点的中点切分上下边界
     rows = []
