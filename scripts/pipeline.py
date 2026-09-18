@@ -626,6 +626,7 @@ def parse_rows(items, pool=None, width=1921):
 
     themes, by_name = [], {}
     kw_used, name_used = set(), set()
+    used_pool, used_ocr = [0], [0]     # 明细字段来源统计
     carry = None          # 跨图片延续的主题名（上一张图最后一个主题）
 
     for fn in files:
@@ -716,27 +717,35 @@ def parse_rows(items, pool=None, width=1921):
             if nm is not None:
                 name_used.add((nm['y'], nm['x'], nm['v']))
 
-            streak = parse_streak(st['v']) if st else 1
-
-            name = ''
-            if pool and pool.get(r['code']):
-                name = pool[r['code']]           # 涨停池名称最可靠
-            elif nm:
-                name = nm['v']
+            # ---- 明细字段：以涨停池为准，OCR 兜底 ----
+            # 池的 reason_type / last_limit_up_time / high_days 与官方图的
+            # 涨停关键词列 / 最终涨停时间列 / 连板天数列同源（已逐只核对），
+            # 且不会像 OCR 那样把「涨停原因内容」的残片混进关键词。
+            ps = pool_get(pool, r['code']) or {}
+            name = ps.get('name') or (nm['v'] if nm else '')
+            streak = ps.get('streak') or (parse_streak(st['v']) if st else 1)
+            time_v = ps.get('time') or (tm['v'] if tm else '')
+            kw_v = ps.get('reason') or (kw['v'] if kw else '')
+            if ps:
+                used_pool[0] += 1
+            else:
+                used_ocr[0] += 1
 
             th_stocks = by_name[th['name']]['stocks']
             if any(s['code'] == r['code'] for s in th_stocks):
                 continue
             th_stocks.append({
                 'code': r['code'], 'name': name,
-                'time': tm['v'] if tm else '',
+                'time': time_v,
                 'streak': streak,
-                'keyword': kw['v'] if kw else '',
+                'keyword': kw_v,
             })
 
         # 下一张图开头的股票（出现在该图第一个标题之前）延续本图最后一个主题
         if themes:
             carry = themes[-1]['name']
+
+    print('  明细字段来源：涨停池 %d 只 / OCR 兜底 %d 只' % (used_pool[0], used_ocr[0]))
 
     # 归属体检：解析家数与图上标注家数偏差过大，多半是某个主题标题漏识别导致串区
     for th in themes:
@@ -761,8 +770,32 @@ def parse_rows(items, pool=None, width=1921):
 
 
 # ---------------------------------------------------------------- 校验
+def ts_to_bj(ts):
+    """Unix 秒 → 北京时间 HH:MM:SS"""
+    n = int(ts or 0)
+    if not n:
+        return ''
+    d = datetime.fromtimestamp(n, timezone.utc) + timedelta(hours=8)
+    return d.strftime('%H:%M:%S')
+
+
+def pool_get(pool, code):
+    """兼容两种池结构：{code: name}（旧/测试用）与 {code: {...}}（fetch_pool 产出）"""
+    v = (pool or {}).get(code)
+    if v is None:
+        return None
+    return v if isinstance(v, dict) else {'name': v}
+
+
 def fetch_pool(date):
-    codes = {}
+    """涨停池：既用于交叉校验，也是**明细字段的权威来源**。
+
+    关键事实（已逐只核对）：池的 reason_type == 官方图「涨停关键词」列、
+    last_limit_up_time == 「最终涨停时间」列、high_days == 「连板天数」列，
+    三者与官方图完全同源。所以明细字段以池为准，OCR 仅作兜底 ——
+    OCR 读「涨停原因内容」那一大段时会产生「托。」「560.06%。」这类残片。
+    """
+    out = {}
     for page in range(1, 5):
         try:
             r = get(POOL_API, referer=POOL_REFERER, params={
@@ -774,12 +807,20 @@ def fetch_pool(date):
                 break
             info = (j.get('data') or {}).get('info') or []
             for s in info:
-                codes[str(s.get('code', '')).zfill(6)] = s.get('name', '')
+                code = str(s.get('code', '')).zfill(6)
+                hd = s.get('high_days') or ''
+                st = parse_streak(hd) if hd else ((int(s.get('high_days_value') or 0) >> 16) or 1)
+                out[code] = {
+                    'name': s.get('name', '') or '',
+                    'reason': s.get('reason_type', '') or '',
+                    'time': ts_to_bj(s.get('last_limit_up_time') or s.get('first_limit_up_time')),
+                    'streak': st or 1,
+                }
             if len(info) < 200:
                 break
         except Exception:
             break
-    return codes
+    return out
 
 
 # ---------------------------------------------------------------- 主流程
