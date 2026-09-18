@@ -65,8 +65,8 @@ add(9230, C_TIME, '10:11:51')
 add(9230, C_STREAK, '首板')
 add(9230, C_KW, '家纺+跨境电商')
 
-# ---- 主题三：完整标题，且股票排在标题之后 ----
-add(9600, 960, '大消费*10')
+# ---- 主题三：完整标题，且股票排在标题之后（间距按真实排版 ≈300px）----
+add(9430, 960, '大消费*10')
 add(9700, C_CODE, '会稽山')
 add(9730, C_CODE, '601579')
 add(9730, C_AMT, '7.27亿')
@@ -135,6 +135,40 @@ for label, passed in [
     print('  %s %s' % ('[OK]' if passed else '[FAIL]', label))
     ok = ok and passed
 
+# ---------------------------------------------------------------- 跨图延续
+# 长图被拆成多张时，每张图的 y 都从 0 开始。上一张图末尾的主题会延续到
+# 下一张图的开头（在下一张图第一个标题之前）。归属必须按图分组做，否则会串位。
+multi = []
+
+
+def madd(fn, y, x, t):
+    multi.append((fn, 0, y, x, t))
+
+
+# 第 1 张图：算力 3 只（只放下前 2 只）
+madd('20260918_0.png', 700, 960, '算力/半导体产业链*3')
+madd('20260918_0.png', 1150, 45, '001216')
+madd('20260918_0.png', 1150, 513, '09:56:39')
+madd('20260918_0.png', 1550, 45, '002453')
+madd('20260918_0.png', 1550, 513, '10:41:15')
+# 第 2 张图：开头是算力的第 3 只（无标题），之后才是新主题
+madd('20260918_1.png', 300, 45, '601579')          # y 也从 0 起算，与上图重叠
+madd('20260918_1.png', 300, 513, '09:43:04')
+madd('20260918_1.png', 1200, 960, '大消费*1')
+madd('20260918_1.png', 1600, 45, '000002')
+madd('20260918_1.png', 1600, 513, '14:22:18')
+
+mt = P.parse_rows(multi, pool, W)
+mgot = {t['name']: [s['code'] for s in t['stocks']] for t in mt}
+print('\n--- 跨图延续 ---')
+print('  第1张图算力2只 + 第2张图开头1只 →', mgot.get('算力/半导体产业链'))
+print('  第2张图新主题大消费 →', mgot.get('大消费'))
+cross_ok = (mgot.get('算力/半导体产业链') == ['001216', '002453', '601579']
+            and mgot.get('大消费') == ['000002'])
+print('  %s 跨图归属正确（第2张图开头的股票延续上一主题）'
+      % ('[OK]' if cross_ok else '[FAIL]'))
+ok = ok and cross_ok
+
 # ---------------------------------------------------------------- 规模仿真
 # 用仓库里最新一天的**真实**（主题数 / 家数 / 代码 / 时间 / 连板 / 关键词）
 # 还原成坐标，走一遍完整解析，逐主题比对。列位置取自线上实测日志：
@@ -148,37 +182,49 @@ if not cands:
     print('\n[跳过] 规模仿真：themes/ 下暂无真实产物')
 else:
     gt = json.load(open(cands[-1], encoding='utf-8'))
-    sim, cur = [], 700
+    HEIGHTS = [11058, 11528, 10377]      # 三张图的真实高度
+    sim3, fi, y = [], 0, 500
 
-    def sadd(y, x, t):
-        sim.append(('full_1.png', 0, y, x, t))
+    def sadd(x, t, yy=None):
+        sim3.append(('%s_%d.png' % (gt['date'], fi), 0, y if yy is None else yy, x, t))
+
+    def nxt_file():
+        """换到下一张图（y 归零）——整行判断，绝不让一行被切在两图之间（真实图就是这样）"""
+        global fi, y
+        fi += 1
+        y = 500
 
     for th in gt['themes']:
-        sadd(cur, 960, '%s*%d' % (th['name'], th['declare']))
+        if fi < 2 and y + 200 > HEIGHTS[fi]:
+            nxt_file()
+        sadd(960, '%s*%d' % (th['name'], th['declare']))
+        y += 150
         for st in th['stocks']:
-            cur += 420
-            sadd(cur - 25, 45, st['name'])
-            sadd(cur, 45, st['code'])
-            sadd(cur, 363, '4.96亿')
-            sadd(cur, 513, st['time'] or '09:30:00')
-            sadd(cur, 622, '首板' if st['streak'] == 1 else '%d连板' % st['streak'])
-            sadd(cur, 800, st['keyword'])
+            if fi < 2 and y + 300 > HEIGHTS[fi]:
+                nxt_file()
+            y += 220
+            sadd(45, st['name'], y - 25)
+            sadd(45, st['code'])
+            sadd(363, '4.96亿')
+            sadd(513, st['time'] or '09:30:00')
+            sadd(622, '首板' if st['streak'] == 1 else '%d连板' % st['streak'])
+            sadd(800, st['keyword'])
             # 原因列干扰：中央区域里的杂质短词，绝不能变成标题
-            sadd(cur, 1100, '业绩增长')
-            sadd(cur, 1200, '*2')
-            sadd(cur, 1300, '大消费')
+            sadd(1100, '业绩增长')
+            sadd(1200, '*2')
+            sadd(1300, '大消费')
             # 模拟重叠切片：同一行被识别两次（y 抖动 5px）
             if st['code'].endswith('6'):
-                sadd(cur + 5, 45, st['code'])
-                sadd(cur + 5, 800, st['keyword'])
-        cur += 700
+                sadd(45, st['code'], y + 5)
+                sadd(800, st['keyword'], y + 5)
+            y += 200
 
     sim_pool = {}
     for th in gt['themes']:
         for st in th['stocks']:
             sim_pool[st['code']] = st['name']
 
-    sim_themes = P.parse_rows(sim, sim_pool, W)
+    sim_themes = P.parse_rows(sim3, sim_pool, W)
     sim_got = {t['name']: t for t in sim_themes}
     print('\n--- 规模仿真（%s：%d 主题 / %d 只）---'
           % (os.path.basename(cands[-1]), len(gt['themes']), gt['total']))
