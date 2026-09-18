@@ -37,14 +37,22 @@ add(1210, C_CODE, '001216')
 add(1210, C_AMT, '4.96亿')                       # 成交额：绝不能被当成关键词
 add(1210, C_TIME, '09:56:39')
 add(1210, C_STREAK, '首板')
-add(1210, C_KW, '氧化锆粉体+MLCC验证+越南基地')
+# 连板列常被 OCR 切碎，残留一个「连板」块 —— 绝不能被当成关键词
+add(1212, C_STREAK, '连板')
+# 关键词列常是多行，OCR 拆成多块 → 应拼回「A+B+C」
+add(1200, C_KW, '氧化锆粉体')
+add(1240, C_KW, 'MLCC验证')
+add(1280, C_KW, '越南基地')
 add(1210, 900, '1、据2026年9月16日互动易回复，公司氧化锆粉体已通过验证')
 add(1580, C_CODE, '华软科技')
 add(1610, C_CODE, '002453')
 add(1610, C_AMT, '5.34亿')
 add(1610, C_TIME, '10:41:15')
-add(1610, C_STREAK, '2连板')
-add(1610, C_KW, '光引发剂+并购莱恩光电+造纸化学品')
+add(1610, C_STREAK, '3天2板')        # 图上连板格式：N天M板 → 连板数取 M = 2
+add(1612, C_STREAK, '连板')
+add(1600, C_KW, '光引发剂')
+add(1640, C_KW, '并购莱恩光电')
+add(1680, C_KW, '造纸化学品')
 # 干扰项：原因列文本里出现的「业绩增长」（在中央区域、且带数字）。
 # 它长在股票行上（同一行有代码 001216），必须被「行独占性」判定为杂质，
 # 绝不能变成主题——上一版就是它把区间切开，导致算力只剩 3 只。
@@ -71,8 +79,10 @@ add(9700, C_CODE, '会稽山')
 add(9730, C_CODE, '601579')
 add(9730, C_AMT, '7.27亿')
 add(9730, C_TIME, '09:43:04')
-add(9730, C_STREAK, '3连板')
-add(9730, C_KW, '黄酒+中秋国庆')
+add(9730, C_STREAK, '4天3板')        # N=4 M=3 → 连板数应为 3
+add(9732, C_STREAK, '连板')
+add(9720, C_KW, '黄酒')
+add(9760, C_KW, '中秋国庆')
 
 pool = {'001216': '华瓷股份', '002453': '华软科技',
         '003041': '真爱美家', '601579': '会稽山'}
@@ -207,16 +217,22 @@ else:
             sadd(45, st['code'])
             sadd(363, '4.96亿')
             sadd(513, st['time'] or '09:30:00')
-            sadd(622, '首板' if st['streak'] == 1 else '%d连板' % st['streak'])
-            sadd(800, st['keyword'])
+            # 连板列真实格式：首板 / N天M板（连板数取 M）
+            sadd(622, '首板' if st['streak'] == 1
+                 else '%d天%d板' % (st['streak'] + 1, st['streak']))
+            if st['streak'] > 1:
+                sadd(622, '连板', y + 12)          # 连板列被切碎的残片
+            for pi, part in enumerate([p for p in (st['keyword'] or '').split('+') if p]):
+                sadd(800, part, y + pi * 40)        # 关键词列多行，需拼回
             # 原因列干扰：中央区域里的杂质短词，绝不能变成标题
             sadd(1100, '业绩增长')
             sadd(1200, '*2')
             sadd(1300, '大消费')
-            # 模拟重叠切片：同一行被识别两次（y 抖动 5px）
+            # 模拟重叠切片：同一行被识别两次（整行每个词块都重复一遍，y 抖动 5px）
             if st['code'].endswith('6'):
                 sadd(45, st['code'], y + 5)
-                sadd(800, st['keyword'], y + 5)
+                for pi, part in enumerate([p for p in (st['keyword'] or '').split('+') if p]):
+                    sadd(800, part, y + pi * 40 + 5)
             y += 200
 
     sim_pool = {}
