@@ -57,12 +57,3 @@ jobs:
             git commit -m "chore: 更新官方复盘主题分类 $(TZ=Asia/Shanghai date +%Y-%m-%d)"
             git push
           fi
-
-      # 国内备用链路：同步一份到 Gitee 镜像仓库（需在 Secrets 配 GITEE_USER / GITEE_TOKEN）
-      # 未配置则自动跳过，不影响主流程
-      - name: 同步到 Gitee 镜像（国内备用）
-        if: ${{ secrets.GITEE_TOKEN != '' && secrets.GITEE_USER != '' }}
-        run: |
-          git remote remove gitee 2>/dev/null || true
-          git remote add gitee "https://${{ secrets.GITEE_USER }}:${{ secrets.GITEE_TOKEN }}@gitee.com/${{ secrets.GITEE_USER }}/limitup-themes.git"
-          git push gitee HEAD:main --force || echo "Gitee 同步失败（不影响主流程）"
