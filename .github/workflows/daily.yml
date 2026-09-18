@@ -61,6 +61,14 @@ jobs:
           echo "目标日期: $DATE  图源API: ${REVIEW_API_BASE:-未配置(直接爬同花顺)}"
           python -u scripts/pipeline.py --date "$DATE" $FORCE $LOCATE || true
 
+      # 自动体检：关键词是否混入连板/成交额、连板数是否全为 1、时间缺失、家数偏差
+      - name: 产出体检
+        if: always()
+        run: |
+          DATE="${{ github.event.inputs.date }}"
+          if [ -z "$DATE" ]; then DATE=$(TZ=Asia/Shanghai date +%Y%m%d); fi
+          python -u scripts/check_output.py "$DATE" || true
+
       # 排障用：把 OCR 原始数据（每个文字块的文本+坐标）上传为 artifact。
       # 解析结果不理想时，从 Actions 页面下载它，就能在本地离线复现与调参。
       - name: 上传 OCR 原始数据（排障用）
