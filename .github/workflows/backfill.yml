@@ -1,0 +1,87 @@
+name: 批量回填历史
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: '开始日期 YYYYMMDD'
+        required: true
+        default: '20260101'
+      end_date:
+        description: '结束日期 YYYYMMDD（建议一次不超过 120 天）'
+        required: true
+        default: '20260916'
+      shards:
+        description: '并行分片数'
+        required: false
+        default: '8'
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+    steps:
+      - name: 生成分片
+        id: gen
+        run: |
+          python - "${{ inputs.start_date }}" "${{ inputs.end_date }}" "${{ inputs.shards }}" <<'PYEOF' >> $GITHUB_OUTPUT
+          import sys, json
+          from datetime import datetime, timedelta
+          s = datetime.strptime(sys.argv[1], '%Y%m%d')
+          e = datetime.strptime(sys.argv[2], '%Y%m%d')
+          n = max(1, int(sys.argv[3]))
+          days = []
+          d = s
+          while d <= e:
+              if d.weekday() < 5:
+                  days.append(d.strftime('%Y%m%d'))
+              d += timedelta(days=1)
+          k = max(1, (len(days) + n - 1) // n)
+          chunks = [days[i:i + k] for i in range(0, len(days), k)]
+          print('matrix=' + json.dumps({'chunk': [{'start': c[0], 'end': c[-1]} for c in chunks if c]}))
+          PYEOF
+
+  transcribe:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 准备 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 跑转录 ${{ matrix.chunk.start }} ~ ${{ matrix.chunk.end }}
+        run: python scripts/pipeline.py --range ${{ matrix.chunk.start }} ${{ matrix.chunk.end }} || true
+
+      - name: 提交
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add themes review
+          if git diff --cached --quiet; then
+            echo "本分片无新增"
+          else
+            git commit -m "chore: 回填 ${{ matrix.chunk.start }}-${{ matrix.chunk.end }}"
+            for i in 1 2 3 4 5; do
+              git pull --rebase origin main && git push && break
+              echo "第 $i 次推送失败，重试…"; sleep $((i*5))
+            done
+          fi

@@ -1,0 +1,68 @@
+name: 每日官方复盘转录
+
+on:
+  schedule:
+    # 北京时间 16:30（官方复盘帖一般 15:30~16:30 发布）—— 第一次
+    - cron: '30 8 * * 1-5'
+    # 北京时间 20:00 —— 第二次补跑：若首次未拿到图 / OCR 未通过校验，这次再试
+    - cron: '0 12 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      date:
+        description: '指定日期 YYYYMMDD（留空=今天）'
+        required: false
+      force:
+        description: '强制重跑（忽略已校验结果）'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  transcribe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 准备 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 跑转录
+        run: |
+          DATE="${{ github.event.inputs.date }}"
+          if [ -z "$DATE" ]; then DATE=$(TZ=Asia/Shanghai date +%Y%m%d); fi
+          FORCE=""
+          if [ "${{ github.event.inputs.force }}" = "true" ]; then FORCE="--force"; fi
+          echo "目标日期: $DATE"
+          python scripts/pipeline.py --date "$DATE" $FORCE || true
+
+      - name: 提交结果
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add themes review
+          if git diff --cached --quiet; then
+            echo "无新增数据"
+          else
+            git commit -m "chore: 更新官方复盘主题分类 $(TZ=Asia/Shanghai date +%Y-%m-%d)"
+            git push
+          fi
+
+      # 国内备用链路：同步一份到 Gitee 镜像仓库（需在 Secrets 配 GITEE_USER / GITEE_TOKEN）
+      # 未配置则自动跳过，不影响主流程
+      - name: 同步到 Gitee 镜像（国内备用）
+        if: ${{ secrets.GITEE_TOKEN != '' && secrets.GITEE_USER != '' }}
+        run: |
+          git remote remove gitee 2>/dev/null || true
+          git remote add gitee "https://${{ secrets.GITEE_USER }}:${{ secrets.GITEE_TOKEN }}@gitee.com/${{ secrets.GITEE_USER }}/limitup-themes.git"
+          git push gitee HEAD:main --force || echo "Gitee 同步失败（不影响主流程）"
