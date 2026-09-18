@@ -73,7 +73,32 @@ CODE_RE = re.compile(r'^\d{6}$')
 AMOUNT_RE = re.compile(r'^\d+(\.\d+)?\s*[亿万]$')
 NUM13_RE = re.compile(r'^\d{1,3}$')
 TIME_RE = re.compile(r'^\d{1,2}:\d{2}(:\d{2})?$')
-STREAK_RE = re.compile(r'^(首板|\d{1,2}\s*连板|\d{1,2}\s*板)$')
+# 连板列的图上格式是「首板」或「N天M板」（如 4天4板 / 3天2板 / 6天3板），
+# 连板数取 M。同花顺涨停池的 high_days 同为此格式，high_days_value>>16 == M。
+STREAK_RE = re.compile(r'^(首板|\d{1,2}\s*天\s*\d{1,2}\s*板|\d{1,2}\s*连板|\d{1,2}\s*板)$')
+STREAK_WORDS = ('连板', '首板', '天数', '连板天数', '连板数', '几连板')
+
+
+def parse_streak(sv):
+    """从连板列文本取连板数：首板→1；N天M板→M；N连板→N；N板→N"""
+    s = str(sv or '').replace(' ', '')
+    if not s:
+        return 1
+    if s.startswith('首板'):
+        return 1
+    m = re.match(r'^(\d{1,2})天(\d{1,2})板$', s)
+    if m:
+        return int(m.group(2))
+    m = re.match(r'^(\d{1,2})连板$', s)
+    if m:
+        return int(m.group(1))
+    m = re.match(r'^(\d{1,2})板$', s)
+    if m:
+        return int(m.group(1))
+    m = re.match(r'^(\d{1,2})', s)
+    if m:
+        return int(m.group(1))
+    return 1
 TITLE_RE = re.compile(r'^(.{2,20}?)[\s]*[\*＊✱x×X·•・]?[\s]*(\d{1,3})$')
 TITLE_NAME_RE = re.compile(r'^[\u4e00-\u9fa5A-Za-z0-9/]+$')   # 标题名形态：中文/字母/数字/斜杠
 LONG_RE = re.compile(r'_(\d+)_(\d+)\.(?:png|jpe?g|webp)$', re.I)
@@ -425,6 +450,25 @@ def theme_prior(s):
     return 0
 
 
+def is_field_noise(s):
+    """判断文本是不是其它列的字段（成交额/价格/时间/连板/表头词），
+    用来防止它们被当成涨停关键词。s 需已去空格。"""
+    if not s:
+        return True
+    if s in STREAK_WORDS or s in ('涨停', '涨停时间', '成交额', '价格',
+                                  '涨停关键词', '名称', '代码', '股票简称'):
+        return True
+    if AMOUNT_RE.match(s) or TIME_RE.match(s) or STREAK_RE.match(s):
+        return True
+    if re.match(r'^\d+(\.\d+)?$', s):                 # 纯数字（价格 / 家数）
+        return True
+    if re.match(r'^\d{1,2}天(\d{1,2}板?)?$', s):      # 「3天」「3天2板」残片
+        return True
+    if re.match(r'^\d{1,2}连$', s):                    # 「2连」残片
+        return True
+    return False
+
+
 def classify(items, width=1921, prof=None):
     """按「格式 + 列位置」分流，避免把成交额误当关键词。
 
@@ -432,8 +476,15 @@ def classify(items, width=1921, prof=None):
     """
     if prof is None:
         prof = column_profile(items)
-    kw_lo = (prof['time'] + 15) if prof['time'] is not None else None
-    kw_hi = (prof['time'] + 430) if prof['time'] is not None else None
+    # 关键词列 = 连板列右边那一列。下界必须避开连板列，否则「4天3板」「连板」
+    # 这些连板列文本会被当成涨停关键词（历史 bug）。
+    if prof['time'] is None:
+        kw_lo = kw_hi = None
+    else:
+        kw_lo = prof['time'] + 15
+        if prof['streak'] is not None and prof['streak'] > prof['time']:
+            kw_lo = max(kw_lo, prof['streak'] + 20)
+        kw_hi = prof['time'] + 430
     tx0, tx1 = width * 0.30, width * 0.70    # 标题居中带
     rx0, rx1 = width * 0.35, width * 0.65    # 救援候选的居中带（更严）
     titles, codes, times, streaks, keywords, names, amounts = [], [], [], [], [], [], []
@@ -460,22 +511,15 @@ def classify(items, width=1921, prof=None):
         if AMOUNT_RE.match(s):
             amounts.append({'y': y, 'x': x, 'v': s})
             continue
-        # 关键词典型形态是「A+B+C」，带 + 号（CJK_RE 不含 +，必须单独收）
-        if ('+' in s or '＋' in s) and 2 <= len(s) <= 34:
-            keywords.append({'y': y, 'x': x, 'v': s})
-            continue
+        # 关键词列：直接按「列区间」收集，**不限制长度** ——
+        # 关键词常是长词块（如「投资半导体及机器人」11 字），
+        # 若走 CJK_RE（2~8 字）会被整块丢掉（历史 bug）。
+        if kw_lo is not None and kw_lo <= x <= kw_hi and 2 <= len(s) <= 40:
+            if not is_field_noise(s):
+                keywords.append({'y': y, 'x': x, 'v': s})
+                continue
         if CJK_RE.match(s) and not s.replace('.', '').isdigit():
             names.append({'y': y, 'x': x, 'v': s})
-
-    # 关键词只保留落在「时间列右侧那一列」的候选：
-    # ① 带 + 的按列区间过滤 ② 再从 names 里补不带 + 但同在该列的（如「国企背景」）
-    if kw_lo is not None:
-        keywords = [k for k in keywords if kw_lo <= k['x'] <= kw_hi]
-        for n in names:
-            if kw_lo <= n['x'] <= kw_hi and 2 <= len(n['v']) <= 34:
-                keywords.append(n)
-    else:
-        keywords = []
 
     # ---- 标题判定的两个几何条件（在单张图内进行）----
     import bisect
@@ -631,20 +675,37 @@ def parse_rows(items, pool=None, width=1921):
             tms = in_row(times, r)
             tm = min(tms, key=lambda a: abs(a['x'] - (prof['time'] or a['x']))) if tms else None
             sts = in_row(streaks, r)
-            st = sts[0] if sts else None
+            st = min(sts, key=lambda a: abs(a['x'] - (prof['streak'] or a['x']))) if sts else None
 
             # 关键词：只取「时间列右侧那一列」，排除成交额/价格/时间/连板
-            def not_noise(v):
-                s = v.replace(' ', '')
-                return not (AMOUNT_RE.match(s) or TIME_RE.match(s)
-                            or STREAK_RE.match(s) or re.match(r'^\d+(\.\d+)?$', s))
             # 注意：去重键用「坐标+文本」，不能用 id(对象) ——
             # dedupe_items 丢弃的对象会被 GC，其 id 会被后续新对象复用，导致误判为已取用
-            kws = [k for k in in_row(keywords, r) if not_noise(k['v'])
+            kws = [k for k in in_row(keywords, r)
+                   if not is_field_noise(k['v'].replace(' ', ''))
                    and (k['y'], k['x'], k['v']) not in kw_used]
-            kw = min(kws, key=lambda a: a['x']) if kws else None
-            if kw is not None:
-                kw_used.add((kw['y'], kw['x'], kw['v']))
+            kw = None
+            if kws:
+                # 关键词列常是多行，OCR 会拆成多块 → 按纵向顺序拼回「A+B+C」
+                kws.sort(key=lambda a: (a['y'], a['x']))
+                raw = []
+                for k in kws:
+                    kw_used.add((k['y'], k['x'], k['v']))
+                    v = k['v'].strip('+＋ ')
+                    if v:
+                        raw.append(v)
+                # 重叠切片可能同时给出「整串」和「拆分词」→ 丢掉被整串包含的短块。
+                # 只有**含 + 的整串块**才有资格吃掉别的块：
+                # 否则会把「数据库」这种本身就是短词的独立关键词误删
+                # （它恰好是「多模态数据库」的子串）。
+                big = [v for v in raw if ('+' in v or '＋' in v)]
+                kept = [v for v in raw
+                        if v in big or not any(v != w and v in w for w in big)]
+                parts = []
+                for v in kept:
+                    if v not in parts:
+                        parts.append(v)
+                if parts:
+                    kw = {'y': kws[0]['y'], 'x': kws[0]['x'], 'v': '+'.join(parts)}
 
             # 名称：代码正上方、同一列（水平接近），且未被其他行占用
             nms = [n for n in names
@@ -655,13 +716,7 @@ def parse_rows(items, pool=None, width=1921):
             if nm is not None:
                 name_used.add((nm['y'], nm['x'], nm['v']))
 
-            streak = 1
-            if st:
-                sv = st['v'].replace(' ', '')
-                if not sv.startswith('首板'):
-                    mm = re.match(r'^(\d{1,2})', sv)
-                    if mm:
-                        streak = int(mm.group(1))
+            streak = parse_streak(st['v']) if st else 1
 
             name = ''
             if pool and pool.get(r['code']):
