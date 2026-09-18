@@ -64,5 +64,5 @@ jobs:
         if: ${{ secrets.GITEE_TOKEN != '' && secrets.GITEE_USER != '' }}
         run: |
           git remote remove gitee 2>/dev/null || true
-          git remote add gitee "https://${{ secrets.mihumilo }}:${{ secrets.ddfa371c6e0cc1d3444188c1cdcb2ce5 }}@gitee.com/${{ secrets.mihumilo }}/limitup-themes.git"
+          git remote add gitee "https://${{ secrets.GITEE_USER }}:${{ secrets.GITEE_TOKEN }}@gitee.com/${{ secrets.GITEE_USER }}/limitup-themes.git"
           git push gitee HEAD:main --force || echo "Gitee 同步失败（不影响主流程）"
