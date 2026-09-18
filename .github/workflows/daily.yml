@@ -15,6 +15,10 @@ on:
         description: '强制重跑（忽略已校验结果）'
         type: boolean
         default: false
+      locate_only:
+        description: '只做连通性自检：定位帖子+下载长图，不做 OCR（秒级完成，排查 401 用）'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -37,14 +41,20 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # -u：关闭输出缓冲，实时看到每一步日志（不然要等进程结束才一次性刷出来）
+      # REVIEW_API_BASE：可选，填 Worker 的 /api/review 地址，用于绕开 GitHub 出口限制
       - name: 跑转录
+        env:
+          REVIEW_API_BASE: ${{ vars.REVIEW_API_BASE }}
         run: |
           DATE="${{ github.event.inputs.date }}"
           if [ -z "$DATE" ]; then DATE=$(TZ=Asia/Shanghai date +%Y%m%d); fi
           FORCE=""
           if [ "${{ github.event.inputs.force }}" = "true" ]; then FORCE="--force"; fi
-          echo "目标日期: $DATE"
-          python scripts/pipeline.py --date "$DATE" $FORCE || true
+          LOCATE=""
+          if [ "${{ github.event.inputs.locate_only }}" = "true" ]; then LOCATE="--locate-only"; fi
+          echo "目标日期: $DATE  图源API: ${REVIEW_API_BASE:-未配置(直接爬同花顺)}"
+          python -u scripts/pipeline.py --date "$DATE" $FORCE $LOCATE || true
 
       - name: 提交结果
         run: |
@@ -57,3 +67,12 @@ jobs:
             git commit -m "chore: 更新官方复盘主题分类 $(TZ=Asia/Shanghai date +%Y-%m-%d)"
             git push
           fi
+
+      # 国内备用链路：同步一份到 Gitee 镜像仓库（需在 Secrets 配 GITEE_USER / GITEE_TOKEN）
+      # 未配置则自动跳过，不影响主流程
+      - name: 同步到 Gitee 镜像（国内备用）
+        if: ${{ secrets.GITEE_TOKEN != '' && secrets.GITEE_USER != '' }}
+        run: |
+          git remote remove gitee 2>/dev/null || true
+          git remote add gitee "https://${{ secrets.GITEE_USER }}:${{ secrets.GITEE_TOKEN }}@gitee.com/${{ secrets.GITEE_USER }}/limitup-themes.git"
+          git push gitee HEAD:main --force || echo "Gitee 同步失败（不影响主流程）"
