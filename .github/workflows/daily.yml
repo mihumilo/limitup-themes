@@ -61,6 +61,17 @@ jobs:
           echo "目标日期: $DATE  图源API: ${REVIEW_API_BASE:-未配置(直接爬同花顺)}"
           python -u scripts/pipeline.py --date "$DATE" $FORCE $LOCATE || true
 
+      # 排障用：把 OCR 原始数据（每个文字块的文本+坐标）上传为 artifact。
+      # 解析结果不理想时，从 Actions 页面下载它，就能在本地离线复现与调参。
+      - name: 上传 OCR 原始数据（排障用）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ocr-raw-${{ github.run_id }}
+          path: _work/ocr_*.json
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: 提交结果
         run: |
           git config user.name "github-actions[bot]"
