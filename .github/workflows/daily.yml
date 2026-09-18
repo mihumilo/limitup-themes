@@ -26,6 +26,11 @@ permissions:
 jobs:
   transcribe:
     runs-on: ubuntu-latest
+    # secrets 不能直接用在 step 的 if: 表达式里（会被判 Invalid workflow），
+    # 统一先注入 job 级 env，if 里用 env.* 判断，run 里用 shell 变量引用
+    env:
+      GITEE_USER: ${{ secrets.GITEE_USER }}
+      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
     steps:
       - name: 检出仓库
         uses: actions/checkout@v4
@@ -71,8 +76,8 @@ jobs:
       # 国内备用链路：同步一份到 Gitee 镜像仓库（需在 Secrets 配 GITEE_USER / GITEE_TOKEN）
       # 未配置则自动跳过，不影响主流程
       - name: 同步到 Gitee 镜像（国内备用）
-        if: ${{ secrets.GITEE_TOKEN != '' && secrets.GITEE_USER != '' }}
+        if: env.GITEE_TOKEN != '' && env.GITEE_USER != ''
         run: |
           git remote remove gitee 2>/dev/null || true
-          git remote add gitee "https://${{ secrets.GITEE_USER }}:${{ secrets.GITEE_TOKEN }}@gitee.com/${{ secrets.GITEE_USER }}/limitup-themes.git"
+          git remote add gitee "https://${GITEE_USER}:${GITEE_TOKEN}@gitee.com/${GITEE_USER}/limitup-themes.git"
           git push gitee HEAD:main --force || echo "Gitee 同步失败（不影响主流程）"
