@@ -145,6 +145,21 @@ for label, passed in [
     print('  %s %s' % ('[OK]' if passed else '[FAIL]', label))
     ok = ok and passed
 
+# ---------------------------------------------------------------- 池优先
+# 明细字段以涨停池为准（池的 reason_type/time/high_days 与官方图同源且无 OCR 残片）
+pool2 = {'001216': {'name': '华瓷股份', 'reason': '氧化锆粉体+MLCC验证+越南基地',
+                    'time': '09:56:39', 'streak': 4}}
+t2 = {t['name']: t for t in P.parse_rows(items, pool2, W)}
+s2 = [s for s in t2.get('算力/半导体产业链', {}).get('stocks', [])
+      if s['code'] == '001216']
+print('\n--- 池优先 ---')
+pool_ok = bool(s2) and s2[0]['streak'] == 4 \
+    and s2[0]['time'] == '09:56:39' \
+    and s2[0]['keyword'] == '氧化锆粉体+MLCC验证+越南基地'
+print('  001216 取自涨停池 →', s2[0] if s2 else '(缺)')
+print('  %s 池值覆盖 OCR（连板 4 而非图注首板）' % ('[OK]' if pool_ok else '[FAIL]'))
+ok = ok and pool_ok
+
 # ---------------------------------------------------------------- 跨图延续
 # 长图被拆成多张时，每张图的 y 都从 0 开始。上一张图末尾的主题会延续到
 # 下一张图的开头（在下一张图第一个标题之前）。归属必须按图分组做，否则会串位。
