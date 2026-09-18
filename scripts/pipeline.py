@@ -49,6 +49,9 @@ POOL_FIELDS = ('199112,10,9001,330323,330324,330325,9002,330329,'
 SEG, OVERLAP = 900, 150          # 切片高度 / 重叠，保证跨切片的行不被切断
 ROW_TOL = 38                     # 同一表格行的 y 容差
 ROW_H = 240                      # 首/末行的行高上限（行区间由相邻代码中点切分得出）
+TITLE_MIN_GAP = 120              # 标题与最近股票代码的最小纵向距离（标题独占一行）
+                                 # 真实排版约 300px；取 120 留足容错，行间隙里的杂质
+                                 # 再由「必带图注家数」这条兜住
 
 # 历史官方主题词表（来自 2026-09 各日复盘图）。用途：
 #   ① 救回被 OCR 切碎/变形的标题（如「大消费*10」被切成两块）
@@ -71,7 +74,8 @@ AMOUNT_RE = re.compile(r'^\d+(\.\d+)?\s*[亿万]$')
 NUM13_RE = re.compile(r'^\d{1,3}$')
 TIME_RE = re.compile(r'^\d{1,2}:\d{2}(:\d{2})?$')
 STREAK_RE = re.compile(r'^(首板|\d{1,2}\s*连板|\d{1,2}\s*板)$')
-TITLE_RE = re.compile(r'^(.{2,20}?)[\s]*[\*＊✱x×X][\s]*(\d{1,3})$')
+TITLE_RE = re.compile(r'^(.{2,20}?)[\s]*[\*＊✱x×X·•・]?[\s]*(\d{1,3})$')
+TITLE_NAME_RE = re.compile(r'^[\u4e00-\u9fa5A-Za-z0-9/]+$')   # 标题名形态：中文/字母/数字/斜杠
 LONG_RE = re.compile(r'_(\d+)_(\d+)\.(?:png|jpe?g|webp)$', re.I)
 IMG_RE = re.compile(r'https?://u\.thsi\.cn/imgsrc/[^\s"\'\\()<>]+\.(?:png|jpe?g|webp)', re.I)
 CJK_RE = re.compile(r'^[\u4e00-\u9fa5A-Za-z0-9\*\.·\-]{2,8}$')
@@ -348,6 +352,12 @@ def load_ocr(date):
 
 
 # ---------------------------------------------------------------- 解析
+def _file_key(fn):
+    """按文件名尾部的序号排序：20260918_0.png < _1.png < … < _10.png（字典序会错）"""
+    m = re.search(r'(\d+)(?=\.[A-Za-z]+$)', str(fn))
+    return (int(m.group(1)) if m else 0, str(fn))
+
+
 def dedupe_items(items):
     """重叠切片会让同一段文字被识别两次。按文本分桶，y/x 接近的视为同一次识别。
     阈值放宽到 80/40：切片边缘的 OCR 框常有十几像素抖动，之前 25px 阈值漏掉了部分重复。"""
@@ -415,13 +425,17 @@ def theme_prior(s):
     return 0
 
 
-def classify(items, width=1921):
-    """按「格式 + 列位置」分流，避免把成交额误当关键词"""
-    # 主题标题是居中大字，只认中央区域，可排除表格里的零散文本
-    cx0, cx1 = width * 0.18, width * 0.82
-    prof = column_profile(items)
+def classify(items, width=1921, prof=None):
+    """按「格式 + 列位置」分流，避免把成交额误当关键词。
+
+    注意：必须**按单张图**调用（每张图的 y 都从 0 开始），否则行锚点会互相穿插。
+    """
+    if prof is None:
+        prof = column_profile(items)
     kw_lo = (prof['time'] + 15) if prof['time'] is not None else None
     kw_hi = (prof['time'] + 430) if prof['time'] is not None else None
+    tx0, tx1 = width * 0.30, width * 0.70    # 标题居中带
+    rx0, rx1 = width * 0.35, width * 0.65    # 救援候选的居中带（更严）
     titles, codes, times, streaks, keywords, names, amounts = [], [], [], [], [], [], []
     for it in items:
         f, si, y, x, t = it
@@ -429,9 +443,10 @@ def classify(items, width=1921):
         if not s:
             continue
         m = TITLE_RE.match(s)
-        if m and cx0 <= x <= cx1 and 2 <= len(m.group(1).strip()) <= 20:
-            titles.append({'y': y, 'x': x, 'name': m.group(1).strip(),
-                           'declare': int(m.group(2))})
+        nm = m.group(1).strip() if m else ''
+        if m and tx0 <= x <= tx1 and 2 <= len(nm) <= 20 and TITLE_NAME_RE.match(nm):
+            titles.append({'y': y, 'x': x, 'name': nm,
+                           'declare': int(m.group(2)), 'src': 'strict'})
             continue
         if CODE_RE.match(s):
             codes.append({'y': y, 'x': x, 'v': s})
@@ -462,20 +477,32 @@ def classify(items, width=1921):
     else:
         keywords = []
 
-    # ---- 标题兜底（rescue）：标题被 OCR 切碎时（如「大消费」+「*10」分成两块），
-    #      在中央区域找与历史官方主题名匹配的短中文块救回来。三个硬条件防误判：
-    #      ① 行独占：±60px 内没有任何 6 位代码。原因列里出现的「大消费」「业绩增长」
-    #         都长在股票行上 → 被这条全部排除（上一版标题 y 错位、归属乱串的元凶）
-    #      ② 先验匹配：名称必须命中历史官方主题词表（精确/前缀/编辑距离≤1）
-    #      ③ 居中：块中心 x 在图宽 35%~65%（真标题文字居中，≈图宽一半）
+    # ---- 标题判定的两个几何条件（在单张图内进行）----
     import bisect
     code_ys = sorted(c['y'] for c in codes)
 
-    def on_stock_row(y):
-        i = bisect.bisect_left(code_ys, y - 60)
-        return i < len(code_ys) and code_ys[i] <= y + 60
+    def dist_to_code(y):
+        """到最近一只股票代码的纵向距离。标题独占一行，必然远离所有股票行。"""
+        if not code_ys:
+            return 10 ** 9
+        i = bisect.bisect_left(code_ys, y)
+        d = 10 ** 9
+        if i < len(code_ys):
+            d = min(d, code_ys[i] - y)
+        if i > 0:
+            d = min(d, y - code_ys[i - 1])
+        return d
 
-    rx0, rx1 = width * 0.35, width * 0.65
+    def on_stock_row(y):
+        return dist_to_code(y) < TITLE_MIN_GAP
+
+    # ---- 标题兜底（rescue）：标题被 OCR 切碎时（如「大消费」+「*10」分成两块），
+    #      在中央区域找与历史官方主题名匹配的短中文块救回来。三个硬条件：
+    #      ① 先验匹配：命中历史官方主题词表（精确/前缀/编辑距离≤1）
+    #      ② 必带图注家数：真标题一定有「*N」，正文里的同名杂质没有
+    #         —— 上一版的假标题（海峡两岸 / 控制权变更 / 军工通信 / 光伏玻璃）
+    #            全是图注 0，被这条全部拒掉
+    #      ③ 行独占 + 居中
     for n in names:
         if not (rx0 <= n['x'] <= rx1) or not (2 <= len(n['v']) <= 14):
             continue
@@ -493,11 +520,12 @@ def classify(items, width=1921):
             if abs(it[2] - n['y']) <= 30 and 0 < it[3] - n['x'] <= 110:
                 declare = int(s)
                 break
+        if declare <= 0:
+            continue
         titles.append({'y': n['y'], 'x': n['x'], 'name': n['v'],
                        'declare': declare, 'src': 'rescue'})
 
-    # ---- 标题统一清理（strict / rescue 都要过）：居中 + 行独占 + 同名去重 ----
-    tx0, tx1 = width * 0.30, width * 0.70
+    # ---- 标题统一清理：居中 + 行独占 + 同名去重 ----
     cleaned, seen_t = [], set()
     for t in titles:
         if not (tx0 <= t['x'] <= tx1):
@@ -508,7 +536,6 @@ def classify(items, width=1921):
         if not k or k in seen_t:
             continue
         seen_t.add(k)
-        t.setdefault('src', 'strict')
         cleaned.append(t)
     titles = cleaned
     return titles, codes, times, streaks, keywords, names, amounts, prof
@@ -539,96 +566,122 @@ def parse_rows(items, pool=None, width=1921):
       ⑤ 名称以涨停池为准（100% 准确），OCR 名称仅作兜底
     """
     items = dedupe_items(items)
-    titles, codes, times, streaks, keywords, names, amounts, prof = classify(items, width)
-    titles.sort(key=lambda t: t['y'])
-    codes.sort(key=lambda c: (c['y'], c['x']))
-    print('  列定位：时间x=%s 成交额x=%s 连板x=%s ｜ 标题 %d 个 / 代码 %d 个'
-          % (prof['time'], prof['amount'], prof['streak'], len(titles), len(codes)))
-    print('  标题清单：%s' % '；'.join(
-        '%s[y=%d,%s,图注%d]' % (t['name'], t['y'], t.get('src', '?'), t.get('declare', 0))
-        for t in titles))
+    prof = column_profile(items)                     # 列位置全图一致，用全局数据算一次
 
-    # 以代码为行锚点，用相邻锚点的中点切分上下边界
-    rows = []
-    for i, c in enumerate(codes):
-        prev = codes[i - 1]['y'] if i > 0 else None
-        nxt = codes[i + 1]['y'] if i + 1 < len(codes) else None
-        top = (prev + c['y']) / 2 if prev is not None else c['y'] - ROW_H
-        bot = (c['y'] + nxt) / 2 if nxt is not None else c['y'] + ROW_H
-        rows.append({'code': c['v'], 'y': c['y'], 'x': c['x'], 'top': top, 'bot': bot})
+    # ★ 长图常被拆成多张（如 3 张），**每张图的 y 都从 0 开始**。
+    #   必须按图片分组、在单张图内完成「标题 ↔ 股票」归属，否则多张图的
+    #   y 会互相穿插，标题与股票全部错配（这是归属错乱的总根源）。
+    by_file = {}
+    for it in items:
+        by_file.setdefault(it[0], []).append(it)
+    files = sorted(by_file.keys(), key=_file_key)
+    print('  图片 %d 张：%s' % (len(files), '、'.join(
+        '%s(%d 项)' % (f, len(by_file[f])) for f in files)))
+    print('  列定位：时间x=%s 成交额x=%s 连板x=%s'
+          % (prof['time'], prof['amount'], prof['streak']))
 
-    def in_row(arr, r):
-        return [a for a in arr if r['top'] <= a['y'] <= r['bot']]
-
-    def theme_of(y):
-        cur = None
-        for t in titles:
-            if t['y'] <= y + 10:
-                cur = t
-            else:
-                break
-        return cur
-
-    themes = []
-    by_name = {}
-    for t in titles:
-        if t['name'] not in by_name:
-            by_name[t['name']] = {'name': t['name'], 'declare': t['declare'], 'stocks': []}
-            themes.append(by_name[t['name']])
-
+    themes, by_name = [], {}
     kw_used, name_used = set(), set()
-    for r in rows:
-        th = theme_of(r['y'])
-        if th is None:
-            continue
+    carry = None          # 跨图片延续的主题名（上一张图最后一个主题）
 
-        tms = in_row(times, r)
-        tm = min(tms, key=lambda a: abs(a['x'] - (prof['time'] or a['x']))) if tms else None
-        sts = in_row(streaks, r)
-        st = sts[0] if sts else None
+    for fn in files:
+        sub = by_file[fn]
+        titles, codes, times, streaks, keywords, names, amounts, _ = classify(sub, width, prof)
+        titles.sort(key=lambda t: t['y'])
+        codes.sort(key=lambda c: (c['y'], c['x']))
+        print('  [%s] 标题 %d 个 / 代码 %d 个' % (fn, len(titles), len(codes)))
+        print('        标题：%s' % '；'.join(
+            '%s[y=%d,%s,图注%d]' % (t['name'], t['y'], t.get('src', '?'), t.get('declare', 0))
+            for t in titles) or '        标题：（无）')
 
-        # 关键词：只取「时间列右侧那一列」，排除成交额/价格/时间/连板
-        def not_noise(v):
-            s = v.replace(' ', '')
-            return not (AMOUNT_RE.match(s) or TIME_RE.match(s)
-                        or STREAK_RE.match(s) or re.match(r'^\d+(\.\d+)?$', s))
-        kws = [k for k in in_row(keywords, r) if not_noise(k['v']) and id(k) not in kw_used]
-        kw = min(kws, key=lambda a: a['x']) if kws else None
-        if kw is not None:
-            kw_used.add(id(kw))
+        for t in titles:
+            if t['name'] not in by_name:
+                by_name[t['name']] = {'name': t['name'], 'declare': t['declare'], 'stocks': []}
+                themes.append(by_name[t['name']])
 
-        # 名称：代码正上方、同一列（水平接近），且未被其他行占用
-        nms = [n for n in names
-               if r['y'] - NAME_ABOVE <= n['y'] <= r['y'] + 10
-               and abs(n['x'] - r['x']) <= NAME_DX
-               and id(n) not in name_used]
-        nm = max(nms, key=lambda a: a['y']) if nms else None
-        if nm is not None:
-            name_used.add(id(nm))
+        # 以代码为行锚点，用相邻锚点的中点切分上下边界
+        rows = []
+        for i, c in enumerate(codes):
+            prev = codes[i - 1]['y'] if i > 0 else None
+            nxt = codes[i + 1]['y'] if i + 1 < len(codes) else None
+            top = (prev + c['y']) / 2 if prev is not None else c['y'] - ROW_H
+            bot = (c['y'] + nxt) / 2 if nxt is not None else c['y'] + ROW_H
+            rows.append({'code': c['v'], 'y': c['y'], 'x': c['x'], 'top': top, 'bot': bot})
 
-        streak = 1
-        if st:
-            sv = st['v'].replace(' ', '')
-            if not sv.startswith('首板'):
-                mm = re.match(r'^(\d{1,2})', sv)
-                if mm:
-                    streak = int(mm.group(1))
+        def in_row(arr, r):
+            return [a for a in arr if r['top'] <= a['y'] <= r['bot']]
 
-        name = ''
-        if pool and pool.get(r['code']):
-            name = pool[r['code']]           # 涨停池名称最可靠
-        elif nm:
-            name = nm['v']
+        def theme_of(y, _titles=titles, _carry=carry):
+            """本图内上方最近的标题；本图标题之前的部分延续上一张图的主题"""
+            cur = None
+            for t in _titles:
+                if t['y'] <= y + 10:
+                    cur = t
+                else:
+                    break
+            if cur is None and _carry:
+                return by_name.get(_carry)
+            return cur
 
-        th_stocks = by_name[th['name']]['stocks']
-        if any(s['code'] == r['code'] for s in th_stocks):
-            continue
-        th_stocks.append({
-            'code': r['code'], 'name': name,
-            'time': tm['v'] if tm else '',
-            'streak': streak,
-            'keyword': kw['v'] if kw else '',
-        })
+        for r in rows:
+            th = theme_of(r['y'])
+            if th is None:
+                continue
+
+            tms = in_row(times, r)
+            tm = min(tms, key=lambda a: abs(a['x'] - (prof['time'] or a['x']))) if tms else None
+            sts = in_row(streaks, r)
+            st = sts[0] if sts else None
+
+            # 关键词：只取「时间列右侧那一列」，排除成交额/价格/时间/连板
+            def not_noise(v):
+                s = v.replace(' ', '')
+                return not (AMOUNT_RE.match(s) or TIME_RE.match(s)
+                            or STREAK_RE.match(s) or re.match(r'^\d+(\.\d+)?$', s))
+            # 注意：去重键用「坐标+文本」，不能用 id(对象) ——
+            # dedupe_items 丢弃的对象会被 GC，其 id 会被后续新对象复用，导致误判为已取用
+            kws = [k for k in in_row(keywords, r) if not_noise(k['v'])
+                   and (k['y'], k['x'], k['v']) not in kw_used]
+            kw = min(kws, key=lambda a: a['x']) if kws else None
+            if kw is not None:
+                kw_used.add((kw['y'], kw['x'], kw['v']))
+
+            # 名称：代码正上方、同一列（水平接近），且未被其他行占用
+            nms = [n for n in names
+                   if r['y'] - NAME_ABOVE <= n['y'] <= r['y'] + 10
+                   and abs(n['x'] - r['x']) <= NAME_DX
+                   and (n['y'], n['x'], n['v']) not in name_used]
+            nm = max(nms, key=lambda a: a['y']) if nms else None
+            if nm is not None:
+                name_used.add((nm['y'], nm['x'], nm['v']))
+
+            streak = 1
+            if st:
+                sv = st['v'].replace(' ', '')
+                if not sv.startswith('首板'):
+                    mm = re.match(r'^(\d{1,2})', sv)
+                    if mm:
+                        streak = int(mm.group(1))
+
+            name = ''
+            if pool and pool.get(r['code']):
+                name = pool[r['code']]           # 涨停池名称最可靠
+            elif nm:
+                name = nm['v']
+
+            th_stocks = by_name[th['name']]['stocks']
+            if any(s['code'] == r['code'] for s in th_stocks):
+                continue
+            th_stocks.append({
+                'code': r['code'], 'name': name,
+                'time': tm['v'] if tm else '',
+                'streak': streak,
+                'keyword': kw['v'] if kw else '',
+            })
+
+        # 下一张图开头的股票（出现在该图第一个标题之前）延续本图最后一个主题
+        if themes:
+            carry = themes[-1]['name']
 
     # 归属体检：解析家数与图上标注家数偏差过大，多半是某个主题标题漏识别导致串区
     for th in themes:
