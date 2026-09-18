@@ -74,11 +74,30 @@ def bj_today():
     return (datetime.now(timezone.utc) + timedelta(hours=8)).strftime('%Y%m%d')
 
 
-def get(url, referer=None, params=None, timeout=30):
+def get(url, referer=None, params=None, timeout=30, cookie=None, retries=1):
+    """带重试的 GET。cookie 用于 pid 详情页（同花顺对无 Cookie 请求返回 401）"""
     h = {'User-Agent': UA, 'Accept-Language': 'zh-CN,zh;q=0.9'}
     if referer:
         h['Referer'] = referer
-    return requests.get(url, headers=h, params=params, timeout=timeout)
+    if cookie:
+        h['Cookie'] = cookie
+    last = None
+    for i in range(retries + 1):
+        try:
+            r = requests.get(url, headers=h, params=params, timeout=timeout)
+            # 401/403 是上游明确拒绝，重试没意义，直接返回
+            if r.status_code in (401, 403):
+                return r
+            if r.status_code == 200:
+                return r
+            last = r
+        except Exception as e:
+            last = e
+        if i < retries:
+            time.sleep(1.5 * (i + 1))
+    if isinstance(last, Exception):
+        raise last
+    return last
 
 
 # ---------------------------------------------------------------- 定位帖子
@@ -97,14 +116,22 @@ def circle_page(n):
 
 
 def fetch_post(pid):
+    """抓 pid 详情页。同花顺对无 Cookie 请求返回 401，必须带 PID_COOKIE。"""
     try:
         r = get('https://t.10jqka.com.cn/pid_%s.shtml' % pid,
-                referer=CIRCLE, timeout=25)
+                referer=CIRCLE, cookie=PID_COOKIE, timeout=25, retries=2)
+        if r.status_code in (401, 403):
+            print('  [warn] pid %s HTTP %s：同花顺拒绝了请求（Cookie 失效 或 出口 IP 被限制）'
+                  % (pid, r.status_code))
+            return None
         if r.status_code != 200:
+            print('  [warn] pid %s HTTP %s' % (pid, r.status_code))
             return None
         html = r.text
-        dm = re.search(r'class="detail-date[^"]*">([^<]{8,12})<', html)
+        dm = re.search(r'class="detail-date[^"]*">\s*([^<]{6,24})<', html)
         if not dm:
+            print('  [warn] pid %s 无 detail-date（版式变化 / 被限流），页首片段: %s'
+                  % (pid, re.sub(r'\s+', ' ', html[:160])))
             return None
         imgs = []
         for m in IMG_RE.finditer(html):
@@ -125,6 +152,42 @@ def fetch_post(pid):
         return None
 
 
+def fetch_post_from_api(date):
+    """可选旁路：从已部署 Worker 的 /api/review 直接取长图 URL。
+
+    用途：GitHub Actions 在美国出口常被同花顺判为异常（详情页 401）。
+    这条链路让 Worker（Cloudflare 出口，已验证可访问）负责抓圈子页，
+    GitHub 只负责下载图片做 OCR——两边各做各自擅长的事。
+
+    配置：仓库 Settings → Secrets and variables → Actions → Variables
+          REVIEW_API_BASE = https://<你的worker域名>/api/review
+    """
+    base = os.environ.get('REVIEW_API_BASE', '').strip()
+    if not base:
+        return None
+    url = base + ('&' if '?' in base else '?') + 'date=' + date
+    try:
+        r = get(url, timeout=30, retries=1)
+        j = r.json()
+    except Exception as e:
+        print('  [warn] 图源接口不可用: %r' % (e,))
+        return None
+    j = j or {}
+    imgs = [u.replace('_middle.', '.') for u in (j.get('imgs') or [])]
+    imgs = [u for u in imgs if IMG_RE.match(u)]
+    longs = [u for u in imgs if (lambda g: (not g) or int(g.group(2)) >= 2000)(LONG_RE.search(u))]
+    longs = longs or imgs
+    if not longs:
+        print('  [warn] 图源接口未返回图片，响应片段: %s' % str(j)[:200])
+        return None
+    print('  从图源接口（Worker）取到 %d 张长图' % len(longs))
+    return {
+        'pid': str(j.get('pid') or ''), 'date': date,
+        'publishedAt': j.get('publishedAt') or '',
+        'title': j.get('title') or '', 'imgs': longs,
+    }
+
+
 def days_ago(d):
     s, t = str(d), bj_today()
     a = datetime(int(s[0:4]), int(s[4:6]), int(s[6:8]))
@@ -141,7 +204,39 @@ def probe_page(n):
 
 
 def find_post(date):
-    """自然日->交易日换算估页码，抽样探测定位，再小范围精扫"""
+    """定位当日复盘帖
+       ① 先精扫列表页最近几篇（覆盖今天/昨天，绝大多数情况直接命中）
+       ② 未命中再走「自然日->交易日」估页码 + 抽样探测 + 精扫
+    """
+    print('  定位 %s 的复盘帖…' % date)
+    _probed = []
+
+    def try_pids(pids, limit=None):
+        """逐个抓详情，命中即返回；记录是否『全部取不到』以便诊断"""
+        ok = 0
+        for k, pid in enumerate(pids if limit is None else pids[:limit]):
+            post = fetch_post(pid)
+            if post:
+                ok += 1
+                if post['date'] == date:
+                    return post
+            if not post:
+                _probed.append(pid)
+        if ok == 0 and pids:
+            print('  [warn] %d 个 pid 详情页全部取不到（多为 401：Cookie 失效 / 出口 IP 被封）' % len(pids))
+        return None
+
+    recent = []
+    for n in (1, 2, 3):
+        for p in circle_page(n):
+            if p not in recent:
+                recent.append(p)
+    if not recent:
+        print('  [warn] 圈子列表页未取到任何 pid（列表页也被限制？）')
+    hit = try_pids(recent, 15)
+    if hit:
+        return hit
+
     est = max(1, int(days_ago(date) * 5 / 7 / 5) - 2)
     probes = [est + i * 8 for i in range(6)]
     pr = [probe_page(n) for n in probes]
@@ -384,7 +479,7 @@ def fetch_pool(date):
 
 
 # ---------------------------------------------------------------- 主流程
-def run_one(date, force=False, from_ocr=False):
+def run_one(date, force=False, from_ocr=False, locate_only=False):
     t0 = time.time()
     print('=' * 60)
     print('[%s] 开始' % date)
@@ -401,9 +496,11 @@ def run_one(date, force=False, from_ocr=False):
         except Exception:
             pass
 
-    post = find_post(date)
+    post = fetch_post_from_api(date) or find_post(date)
     if not post:
-        print('  未找到该日复盘帖（非交易日 / 未发布 / 上游限制）')
+        print('  未找到该日复盘帖。可能原因：① 今天非交易日 ② 官方尚未发布 ③ 上游 401 限制')
+        print('  自查建议：Actions 里用 workflow_dispatch 跑一次 --locate-only，看是否有 401 告警；')
+        print('            若 GitHub 出口被封，给仓库配变量 REVIEW_API_BASE 指向 Worker 的 /api/review。')
         return False
     print('  帖子 pid=%s 发布=%s 长图=%d 张' % (post['pid'], post['publishedAt'], len(post['imgs'])))
 
@@ -412,14 +509,18 @@ def run_one(date, force=False, from_ocr=False):
               open(os.path.join(REVIEW_DIR, date + '.json'), 'w', encoding='utf-8'),
               ensure_ascii=False)
 
+    files = download(post, date)
+    if not files:
+        print('  长图下载失败')
+        return False
+    if locate_only:
+        print('  --locate-only：连通性验证完成（%d 张长图已就绪），跳过 OCR' % len(files))
+        return True
+
     items = load_ocr(date) if from_ocr else None
     if items is not None:
         print('  复用已缓存 OCR：%d 条' % len(items))
     else:
-        files = download(post, date)
-        if not files:
-            print('  长图下载失败')
-            return False
         print('  下载 %d 张，开始 OCR…' % len(files))
         items = []
         for fp in files:
@@ -464,6 +565,8 @@ def main():
     ap.add_argument('--range', nargs=2, metavar=('START', 'END'))
     ap.add_argument('--force', action='store_true')
     ap.add_argument('--from-ocr', action='store_true', help='复用 _work/ocr_<date>.json，不重新识图')
+    ap.add_argument('--locate-only', action='store_true',
+                    help='只定位帖子并下载长图，不做 OCR（秒级完成，用于验证连通性）')
     a = ap.parse_args()
 
     if a.date:
@@ -483,7 +586,7 @@ def main():
     ok = bad = 0
     for d in dates:
         try:
-            if run_one(d, a.force, a.from_ocr):
+            if run_one(d, a.force, a.from_ocr, a.locate_only):
                 ok += 1
             else:
                 bad += 1
