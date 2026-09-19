@@ -1,16 +1,16 @@
-name: 次日清理历史 JSON
+name: 清理历史 JSON（保留最近 N 个交易日）
 
 on:
   schedule:
-    # 北京时间 09:00，**每天**执行（含周末）—— 周末也要清理掉周五的产物，
-    # 否则周一上午仓库里仍留着上周五、周四的 JSON。清理不依赖交易日，不必限工作日。
+    # 北京时间 09:00，**每天**执行（含周末）—— 清理不依赖交易日，不必限工作日；
+    # 早期版本限了 1-5，导致周六上午仓库里还留着周五、周四的 JSON。
     - cron: '0 1 * * *'
   workflow_dispatch:
     inputs:
-      keep_days:
-        description: '保留最近 N 天（0 = 只保留今天，即删除全部历史；填 30 = 保留一个月）'
+      keep:
+        description: '保留最近多少个交易日的 JSON（默认 30）'
         required: false
-        default: '0'
+        default: '30'
 
 permissions:
   contents: write
@@ -25,28 +25,26 @@ jobs:
       - name: 检出仓库
         uses: actions/checkout@v4
 
-      - name: 删除过期 JSON
+      # 按「实际存在的日期文件数」保留最近 N 个交易日：
+      # themes/ 与 review/ 里每个文件就是一天，按文件名（日期）排序取后 N 个即可 ——
+      # 比用自然日倒数（30 交易日 ≈ 42 自然日）更准，也不会因节假日误删。
+      - name: 保留最近 N 个交易日
         run: |
-          KEEP="${{ github.event.inputs.keep_days }}"
-          if [ -z "$KEEP" ]; then KEEP=0; fi
-          TODAY=$(TZ=Asia/Shanghai date +%Y%m%d)
-          CUTOFF=$(TZ=Asia/Shanghai date -d "$TODAY -$KEEP days" +%Y%m%d)
-          echo "今天=$TODAY  保留天数=$KEEP  删除早于 $CUTOFF 的 JSON"
-          DEL=0
-          for f in themes/*.json review/*.json; do
-            [ -e "$f" ] || continue
-            b=$(basename "$f" .json)
-            case "$b" in
-              [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
-              *) continue ;;
-            esac
-            if [ "$b" -lt "$CUTOFF" ]; then
-              rm -f "$f"
-              DEL=$((DEL+1))
+          KEEP="${{ github.event.inputs.keep }}"
+          if [ -z "$KEEP" ]; then KEEP=30; fi
+          echo "保留最近 $KEEP 个交易日"
+          for d in themes review; do
+            [ -d "$d" ] || continue
+            n=$(ls "$d"/*.json 2>/dev/null | wc -l)
+            echo "[$d] 现有 $n 个文件"
+            if [ "$n" -gt "$KEEP" ]; then
+              ls "$d"/*.json | sort | head -n "-$KEEP" | while read -r f; do
+                rm -f "$f"
+                echo "  删除 $f"
+              done
             fi
+            echo "[$d] 剩余 $(ls "$d"/*.json 2>/dev/null | wc -l) 个"
           done
-          echo "已删除 $DEL 个文件"
-          echo "剩余: themes=$(ls themes/*.json 2>/dev/null | wc -l) review=$(ls review/*.json 2>/dev/null | wc -l)"
 
       - name: 提交删除结果
         run: |
@@ -56,7 +54,7 @@ jobs:
           if git diff --cached --quiet; then
             echo "无变化"
           else
-            git commit -m "chore: 清理过期 JSON $(TZ=Asia/Shanghai date +%Y-%m-%d)"
+            git commit -m "chore: 清理历史 JSON（保留最近 30 个交易日）$(TZ=Asia/Shanghai date +%Y-%m-%d)"
             git push
           fi
 
