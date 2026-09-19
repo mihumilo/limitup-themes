@@ -76,29 +76,60 @@ TIME_RE = re.compile(r'^\d{1,2}:\d{2}(:\d{2})?$')
 # 连板列的图上格式是「首板」或「N天M板」（如 4天4板 / 3天2板 / 6天3板），
 # 连板数取 M。同花顺涨停池的 high_days 同为此格式，high_days_value>>16 == M。
 STREAK_RE = re.compile(r'^(首板|\d{1,2}\s*天\s*\d{1,2}\s*板|\d{1,2}\s*连板|\d{1,2}\s*板)$')
+MAX_STREAK = 9                   # 连板数上限；超过这个值基本是 OCR 拼错（如竖排 '3'+'3'→33）
 STREAK_WORDS = ('连板', '首板', '天数', '连板天数', '连板数', '几连板')
 
 
 def parse_streak(sv):
-    """从连板列文本取连板数：首板→1；N天M板→M；N连板→N；N板→N"""
+    """从连板列文本取连板数：首板→1；N天M板→M；N连板→N；N板→N。
+
+    无法判定、或明显异常时返回 None（由调用方回落到涨停池值 / 1）。
+    踩过的坑：连板列是**竖排**文字，OCR 会把「3」和「3板」拼成 '33'，
+    旧逻辑的宽松兜底 `re.match(r'^(\\d{1,2})')` 会直接取成 33 板。"""
     s = str(sv or '').replace(' ', '')
     if not s:
-        return 1
+        return None
     if s.startswith('首板'):
         return 1
     m = re.match(r'^(\d{1,2})天(\d{1,2})板$', s)
     if m:
-        return int(m.group(2))
+        v = int(m.group(2))
+        return v if 1 <= v <= MAX_STREAK else None
     m = re.match(r'^(\d{1,2})连板$', s)
     if m:
-        return int(m.group(1))
+        v = int(m.group(1))
+        return v if 1 <= v <= MAX_STREAK else None
     m = re.match(r'^(\d{1,2})板$', s)
     if m:
-        return int(m.group(1))
-    m = re.match(r'^(\d{1,2})', s)
+        v = int(m.group(1))
+        return v if 1 <= v <= MAX_STREAK else None
+    # 只剩「单个数字」这种残片可信；两位数（'33' / '22'）基本都是竖排粘连 → 不采信
+    m = re.match(r'^(\d)$', s)
     if m:
         return int(m.group(1))
-    return 1
+    return None
+
+
+def pool_streak_of(high_days, high_days_value):
+    """把同花顺池的「N天M板」换算成**连板数**（连续口径，与官方图「连板天数」一致）。
+
+    同花顺池没有直接的「连板数」字段，只有 N 天窗口内的涨停次数 M，二者含义不同。
+    实测 20260918（官方图为准）：
+        内蒙新华 3天3板 → 3 板      （N==M，说明这 M 次是连续的）
+        华瓷股份 4天4板 → 4 板      （N==M）
+        和顺石油 4天2板 → 首板      （N≠M，窗口内有断层 → 今天这一板是新起的第一板）
+        远望谷   6天3板 → 首板      （N≠M，且池 change_tag=FIRST_LIMIT）
+    所以规则是：N==M 时取 M，否则取 1。"""
+    s = str(high_days or '').replace(' ', '')
+    m = re.match(r'^(\d{1,2})天(\d{1,2})板$', s)
+    if m:
+        n, k = int(m.group(1)), int(m.group(2))
+        if 1 <= k <= MAX_STREAK:
+            return k if n == k else 1
+    if s.startswith('首板'):
+        return 1
+    v = (int(high_days_value or 0) >> 16) or 1
+    return v if 1 <= v <= MAX_STREAK else 1
 TITLE_RE = re.compile(r'^(.{2,20}?)[\s]*[\*＊✱x×X·•・]?[\s]*(\d{1,3})$')
 TITLE_NAME_RE = re.compile(r'^[\u4e00-\u9fa5A-Za-z0-9/]+$')   # 标题名形态：中文/字母/数字/斜杠
 LONG_RE = re.compile(r'_(\d+)_(\d+)\.(?:png|jpe?g|webp)$', re.I)
@@ -670,6 +701,7 @@ def parse_rows(items, pool=None, width=1921):
     kw_used, name_used = set(), set()
     used_pool, used_ocr = [0], [0]     # 明细字段来源统计
     streak_conflict = []               # 图上连板数与池不一致的样本（口径差异，便于核对）
+    streak_bad = []                    # 连板列读不出来（竖排粘连等）→ 回落池值的样本
     carry = None          # 跨图片延续的主题名（上一张图最后一个主题）
 
     for fn in files:
@@ -766,14 +798,16 @@ def parse_rows(items, pool=None, width=1921):
             # 且不会像 OCR 那样把「涨停原因内容」的残片混进关键词。
             ps = pool_get(pool, r['code']) or {}
             name = ps.get('name') or (nm['v'] if nm else '')
-            # 连板数**以图上「连板天数」列为准**。踩过的坑：同花顺涨停池的 high_days
-            # 口径与官方图不同 —— 实测 20260918 和顺石油图上写「首板」、池却是「2天2板」，
-            # 若用池值会让看板把这批首板错划到 2 板。图才是看板要对齐的官方口径，池仅兜底。
-            ocr_streak = parse_streak(st['v']) if st else 0
+            # 连板数：**看板最终以 Worker 侧同花顺涨停池的「连续涨停天数」为准**
+            # （worker 里 pickStreak() 用池值覆盖这里），所以这份 JSON 里的 streak
+            # 只是兜底。这里尽量写对，并过滤 OCR 竖排粘连产生的异常值（'33' / '22'）。
+            ocr_streak = (parse_streak(st['v']) or 0) if st else 0
             pool_streak = ps.get('streak') or 0
             if ocr_streak and pool_streak and ocr_streak != pool_streak:
                 streak_conflict.append('%s %s 图=%d 池=%d'
                                         % (r['code'], name, ocr_streak, pool_streak))
+            if st and not ocr_streak:
+                streak_bad.append('%s %s 图上连板列=%r' % (r['code'], name, st['v']))
             streak = ocr_streak or pool_streak or 1
             time_v = ps.get('time') or (tm['v'] if tm else '')
             kw_v = ps.get('reason') or (kw['v'] if kw else '')
@@ -797,8 +831,11 @@ def parse_rows(items, pool=None, width=1921):
             carry = themes[-1]['name']
 
     print('  明细字段来源：涨停池 %d 只 / OCR 兜底 %d 只' % (used_pool[0], used_ocr[0]))
+    if streak_bad:
+        print('  连板列无法判定 %d 只（已回落池值；样例：%s）'
+              % (len(streak_bad), '；'.join(streak_bad[:3])))
     if streak_conflict:
-        print('  连板口径差异 %d 只（已以图为准；样例：%s）'
+        print('  连板口径差异 %d 只（看板最终以池值为准；样例：%s）'
               % (len(streak_conflict), '；'.join(streak_conflict[:3])))
 
     # 归属体检：解析家数与图上标注家数偏差过大，多半是某个主题标题漏识别导致串区
@@ -863,7 +900,7 @@ def fetch_pool(date):
             for s in info:
                 code = str(s.get('code', '')).zfill(6)
                 hd = s.get('high_days') or ''
-                st = parse_streak(hd) if hd else ((int(s.get('high_days_value') or 0) >> 16) or 1)
+                st = pool_streak_of(hd, s.get('high_days_value'))
                 out[code] = {
                     'name': s.get('name', '') or '',
                     'reason': s.get('reason_type', '') or '',
