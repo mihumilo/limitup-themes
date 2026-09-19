@@ -627,6 +627,7 @@ def parse_rows(items, pool=None, width=1921):
     themes, by_name = [], {}
     kw_used, name_used = set(), set()
     used_pool, used_ocr = [0], [0]     # 明细字段来源统计
+    streak_conflict = []               # 图上连板数与池不一致的样本（口径差异，便于核对）
     carry = None          # 跨图片延续的主题名（上一张图最后一个主题）
 
     for fn in files:
@@ -723,7 +724,15 @@ def parse_rows(items, pool=None, width=1921):
             # 且不会像 OCR 那样把「涨停原因内容」的残片混进关键词。
             ps = pool_get(pool, r['code']) or {}
             name = ps.get('name') or (nm['v'] if nm else '')
-            streak = ps.get('streak') or (parse_streak(st['v']) if st else 1)
+            # 连板数**以图上「连板天数」列为准**。踩过的坑：同花顺涨停池的 high_days
+            # 口径与官方图不同 —— 实测 20260918 和顺石油图上写「首板」、池却是「2天2板」，
+            # 若用池值会让看板把这批首板错划到 2 板。图才是看板要对齐的官方口径，池仅兜底。
+            ocr_streak = parse_streak(st['v']) if st else 0
+            pool_streak = ps.get('streak') or 0
+            if ocr_streak and pool_streak and ocr_streak != pool_streak:
+                streak_conflict.append('%s %s 图=%d 池=%d'
+                                        % (r['code'], name, ocr_streak, pool_streak))
+            streak = ocr_streak or pool_streak or 1
             time_v = ps.get('time') or (tm['v'] if tm else '')
             kw_v = ps.get('reason') or (kw['v'] if kw else '')
             if ps:
@@ -746,6 +755,9 @@ def parse_rows(items, pool=None, width=1921):
             carry = themes[-1]['name']
 
     print('  明细字段来源：涨停池 %d 只 / OCR 兜底 %d 只' % (used_pool[0], used_ocr[0]))
+    if streak_conflict:
+        print('  连板口径差异 %d 只（已以图为准；样例：%s）'
+              % (len(streak_conflict), '；'.join(streak_conflict[:3])))
 
     # 归属体检：解析家数与图上标注家数偏差过大，多半是某个主题标题漏识别导致串区
     for th in themes:
