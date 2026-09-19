@@ -145,14 +145,26 @@ for label, passed in [
      and len(got.get('并购重组', [])) == 1
      and len(got.get('大消费', [])) == 1),
     ('原因列杂质未变成假主题（无「业绩增长」）', '业绩增长' not in got),
+    # 连板列是竖排文字，OCR 会把「3」+「3板」粘成 '33'。旧的宽松兜底会读成 33 板
+    ('竖排粘连的连板值不被采信（33/22 → None）',
+     P.parse_streak('33') is None and P.parse_streak('22') is None
+     and P.parse_streak('3') == 3 and P.parse_streak('首板') == 1
+     and P.parse_streak('4天4板') == 4 and P.parse_streak('6天3板') == 3),
+    # 同花顺池「N天M板」→ 连板数（连续口径）：N==M 取 M，否则是新一轮首板=1
+    # 已用 20260918 官方图逐一核对：和顺石油 4天2板→1、远望谷 6天3板→1（都是首板）
+    ('池「N天M板」换算成连板数（与官方图一致）',
+     P.pool_streak_of('3天3板', 196611) == 3 and P.pool_streak_of('4天4板', 262148) == 4
+     and P.pool_streak_of('4天2板', 131076) == 1 and P.pool_streak_of('6天3板', 196614) == 1
+     and P.pool_streak_of('2天2板', 131074) == 2 and P.pool_streak_of('首板', None) == 1),
 ]:
     print('  %s %s' % ('[OK]' if passed else '[FAIL]', label))
     ok = ok and passed
 
 # ---------------------------------------------------------------- 字段来源策略
-# 名称/时间/关键词 以涨停池为准（与官方图同源、无 OCR 残片）；
-# 连板数**以图为准**（池的 high_days 口径与官方图不同，实测 20260918 和顺石油
-# 图上「首板」而池「2天2板」）；只有图上该列没识别出来时才用池兜底。
+# 名称/时间/关键词 以涨停池为准（与官方图同源、无 OCR 残片）。
+# 连板数：pipeline 产出的这条 JSON 里「以图为准、池兜底」（图的连板列读得出就用图值）；
+# 但**看板最终显示的连板数由 Worker 用同花顺涨停池的连续涨停天数覆盖**
+# （worker 的 pickStreak()），因为官方图那列是竖排 OCR，容易拼错（'3'+'3'→33）。
 pool2 = {'001216': {'name': '华瓷股份', 'reason': '氧化锆粉体+MLCC验证+越南基地',
                     'time': '09:56:39', 'streak': 4}}
 t2 = {t['name']: t for t in P.parse_rows(items, pool2, W)}
@@ -165,9 +177,9 @@ print('  001216 →', s2[0] if s2 else '(缺)')
 print('  %s 时间/关键词取池（无 OCR 残片）' % ('[OK]' if use_ok else '[FAIL]'))
 ok = ok and use_ok
 
-# 连板以图为准：图上写「首板」，池写 4 板 → 结果必须是 1
+# JSON 内连板以图为准：图上写「首板」，池写 4 板 → 这条 JSON 里必须是 1
 streak_img_ok = bool(s2) and s2[0]['streak'] == 1
-print('  %s 连板以图为准（图首板 vs 池4板 → 取 1）'
+print('  %s JSON 内连板以图为准（图首板 vs 池4板 → 1）'
       % ('[OK]' if streak_img_ok else '[FAIL]'))
 ok = ok and streak_img_ok
 
