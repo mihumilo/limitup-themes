@@ -145,20 +145,39 @@ for label, passed in [
     print('  %s %s' % ('[OK]' if passed else '[FAIL]', label))
     ok = ok and passed
 
-# ---------------------------------------------------------------- 池优先
-# 明细字段以涨停池为准（池的 reason_type/time/high_days 与官方图同源且无 OCR 残片）
+# ---------------------------------------------------------------- 字段来源策略
+# 名称/时间/关键词 以涨停池为准（与官方图同源、无 OCR 残片）；
+# 连板数**以图为准**（池的 high_days 口径与官方图不同，实测 20260918 和顺石油
+# 图上「首板」而池「2天2板」）；只有图上该列没识别出来时才用池兜底。
 pool2 = {'001216': {'name': '华瓷股份', 'reason': '氧化锆粉体+MLCC验证+越南基地',
                     'time': '09:56:39', 'streak': 4}}
 t2 = {t['name']: t for t in P.parse_rows(items, pool2, W)}
 s2 = [s for s in t2.get('算力/半导体产业链', {}).get('stocks', [])
       if s['code'] == '001216']
-print('\n--- 池优先 ---')
-pool_ok = bool(s2) and s2[0]['streak'] == 4 \
-    and s2[0]['time'] == '09:56:39' \
+print('\n--- 字段来源策略 ---')
+use_ok = bool(s2) and s2[0]['time'] == '09:56:39' \
     and s2[0]['keyword'] == '氧化锆粉体+MLCC验证+越南基地'
-print('  001216 取自涨停池 →', s2[0] if s2 else '(缺)')
-print('  %s 池值覆盖 OCR（连板 4 而非图注首板）' % ('[OK]' if pool_ok else '[FAIL]'))
-ok = ok and pool_ok
+print('  001216 →', s2[0] if s2 else '(缺)')
+print('  %s 时间/关键词取池（无 OCR 残片）' % ('[OK]' if use_ok else '[FAIL]'))
+ok = ok and use_ok
+
+# 连板以图为准：图上写「首板」，池写 4 板 → 结果必须是 1
+streak_img_ok = bool(s2) and s2[0]['streak'] == 1
+print('  %s 连板以图为准（图首板 vs 池4板 → 取 1）'
+      % ('[OK]' if streak_img_ok else '[FAIL]'))
+ok = ok and streak_img_ok
+
+# 池兜底：图上没有连板列时，才用池的连板数
+mini = [('f.png', 0, 700, 960, '算力/半导体产业链*1'),
+        ('f.png', 0, 1210, 45, '001216'),
+        ('f.png', 0, 1210, 363, '4.96亿')]
+t4 = {t['name']: t for t in P.parse_rows(mini, pool2, W)}
+s4 = [s for s in t4.get('算力/半导体产业链', {}).get('stocks', [])
+      if s['code'] == '001216']
+fb_ok = bool(s4) and s4[0]['streak'] == 4
+print('  %s 图上无连板列时回落到池值（→4）'
+      % ('[OK]' if fb_ok else '[FAIL]'))
+ok = ok and fb_ok
 
 # ---------------------------------------------------------------- 跨图延续
 # 长图被拆成多张时，每张图的 y 都从 0 开始。上一张图末尾的主题会延续到
