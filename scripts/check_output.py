@@ -29,6 +29,7 @@ except Exception:
 HERE = os.path.dirname(os.path.abspath(__file__))
 THEMES_DIR = os.path.join(HERE, '..', 'themes')
 
+MAX_STREAK = 9                    # 连板数上限，超过基本是 OCR 竖排粘连
 NOISE_KW = re.compile(r'^(\d{1,2}天\d{0,2}板?|\d{1,2}连板?|首板|连板|天数)$')
 AMOUNT_KW = re.compile(r'^\d+(\.\d+)?[亿万]$')
 TIME_KW = re.compile(r'^\d{1,2}:\d{2}(:\d{2})?$')
@@ -89,6 +90,16 @@ def check_one(path):
         for x in streaks:
             dist[x] = dist.get(x, 0) + 1
         print('  连板分布 %s' % json.dumps(dist, ensure_ascii=False))
+
+    # ③b 连板数异常大：连板列是竖排文字，OCR 会把「3」+「3板」粘成 33
+    absurd = ['%s %s → %s板' % (s['code'], s.get('name'), s.get('streak'))
+              for s in stocks if (s.get('streak') or 0) > MAX_STREAK]
+    if absurd:
+        problems += 1
+        print('  [问题] 连板数异常（> %d 板，多为竖排数字被粘连）：%d 处' % (MAX_STREAK, len(absurd)))
+        for a in absurd[:5]:
+            print('          %s' % a)
+        print('          （看板已由 Worker 用同花顺池值覆盖，但建议重跑该日数据）')
 
     # ④ 时间缺失
     miss_t = ['%s %s' % (s['code'], s.get('name'))
