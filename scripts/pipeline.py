@@ -403,6 +403,46 @@ def dedupe_items(items):
     return out
 
 
+def merge_vertical_streak(items):
+    """合并竖排的连板文本。
+
+    官方图的「连板天数」列是**竖排**（「首」在上、「板」在下，「2」在上、「板」在下），
+    OCR 会把它切成两个单字块 → 拼不出「首板」/「2板」→ 连板数解析失败 →
+    回落到涨停池的 high_days（口径与图不同，会把首板错标成 2 板）。
+    这里把同一列上下紧邻、且拼接后正好构成连板格式的两个短块合并。
+    """
+    order = sorted(range(len(items)), key=lambda i: (items[i][3], items[i][2]))
+    out = list(items)
+    drop, taken = set(), set()
+    for a in range(len(order)):
+        ia = order[a]
+        if ia in drop or ia in taken:
+            continue
+        sa = out[ia][4].replace(' ', '')
+        if not sa or len(sa) > 4:
+            continue
+        for b in range(a + 1, min(a + 6, len(order))):
+            ib = order[b]
+            if ib in drop or ib in taken:
+                continue
+            if abs(out[ia][3] - out[ib][3]) > 70:        # 必须同一列
+                continue
+            sb = out[ib][4].replace(' ', '')
+            if not sb or len(sb) > 4:
+                continue
+            dy = out[ib][2] - out[ia][2]
+            if not (0 < dy < 90):                        # 必须紧邻下方
+                continue
+            joined = sa + sb
+            if STREAK_RE.match(joined):
+                out[ia] = (out[ia][0], out[ia][1],
+                           (out[ia][2] + out[ib][2]) // 2, out[ia][3], joined)
+                drop.add(ib)
+                break
+        taken.add(ia)
+    return [it for i, it in enumerate(out) if i not in drop]
+
+
 def column_profile(items):
     """数据驱动发现各列中心 x：用格式明确的字段（时间/成交额/连板）反推表格列位置。
     比写死列宽更稳，因为不同日期的长图宽度/排版可能略有差异。"""
@@ -610,6 +650,8 @@ def parse_rows(items, pool=None, width=1921):
       ⑤ 名称以涨停池为准（100% 准确），OCR 名称仅作兜底
     """
     items = dedupe_items(items)
+    items = merge_vertical_streak(items)             # 连板列是竖排，先合并单字块
+    items = dedupe_items(items)                      # 合并后可能重复（重叠切片各合并一次）
     prof = column_profile(items)                     # 列位置全图一致，用全局数据算一次
 
     # ★ 长图常被拆成多张（如 3 张），**每张图的 y 都从 0 开始**。
