@@ -1,0 +1,15 @@
+# 运行时产物（备份结果、OCR 中间文件等）
+_work/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# 编辑器 / 系统
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

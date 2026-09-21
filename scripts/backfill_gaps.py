@@ -26,12 +26,20 @@
      分批补可以让后续定时运行接着补，不会把单次任务拖太长）
   4. 逐个调用 pipeline.run_one()（幂等：已 verified 的日期会被自动跳过）
 
-退出码：0 = 无缺口或全部补齐；2 = 仍有缺口（留给下一次运行继续）
+退出码（工作流依赖它，不要随意改）
+--------
+  0 = 正常：无缺口 / 本次有进展 / `--dry` 只查看 / `--reset-only` 只清空
+  2 = 真异常：尝试了但**一个都没补上**（需要人看一眼日志）
+
+★ 为什么不能让「仍有缺口」也返回 2：Actions 的每个 step 都是 `bash -e` 执行的，
+  脚本返回非 0 会**当场中断该 step**，后面的命令全部不执行，并把作业判失败。
+  而"一次最多补 max 个、剩下的留给下次"是设计内的预期行为，不是故障。
 """
 import argparse
 import json
 import os
 import sys
+import time
 from datetime import datetime, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -153,7 +161,17 @@ def main():
                     help='距今不足 N 天的日期失败时只计数、不判定为非交易日（默认 3）')
     ap.add_argument('--reset-tries', action='store_true',
                     help='先清空已判定名单与失败计数，再做本次检查')
+    ap.add_argument('--reset-only', action='store_true',
+                    help='只清空名单与失败计数，不做缺口检查（退出码恒为 0）')
     a = ap.parse_args()
+
+    # ★ --reset-only：给工作流「只做清空」这一步专用。
+    #   以前复用 `--reset-tries --dry`，而 --dry 会以 2 退出（语义是"仍有缺口"），
+    #   Actions 用 bash -e 跑步骤 → 步骤当场中断 → 后面的 git commit/push 全没执行，
+    #   prepare 作业失败 → 依赖它的 transcribe 被跳过 → 整个批量回填什么都没干。
+    if a.reset_only:
+        reset_tries()
+        return 0
 
     if a.reset_tries:
         reset_tries()
@@ -180,40 +198,64 @@ def main():
     if len(todo) < len(missing):
         print('  本次只补最早的 %d 个，剩余 %d 个留给下次运行' % (len(todo), len(missing) - len(todo)))
 
+    # ★ --dry 只查看，**不算失败**。它以前返回 2（照搬"仍有缺口"的语义），
+    #   在 Actions（bash -e）里会把步骤判失败，见 --reset-only 处的说明。
     if a.dry:
-        print('  --dry：不实际执行')
+        print('  --dry：只查看，不实际执行')
+        return 0
+
+    # 依赖缺失（requests / rapidocr 没装）必须落在退出码契约内：
+    # 否则 Python 直接以 1 崩出，工作流侧没法区分"环境坏了"和"数据没补上"。
+    try:
+        pipeline = _pipeline()
+    except Exception as e:
+        print('  ✗ 无法导入 pipeline：%s' % e)
+        print('    通常意味着依赖没装好（pip install -r requirements.txt）')
         return 2
 
-    pipeline = _pipeline()
-    ok = 0
-    for d in todo:
+    tally = {'ok': 0, 'grace': 0, 'new_skip': 0, 'fail': 0, 'error': 0}
+    t0 = time.time()
+    for i, d in enumerate(todo, 1):
+        print('\n  [%d/%d] %s' % (i, len(todo), d))
         try:
             got = pipeline.run_one(d)
         except Exception as e:
-            print('  ✗ %s 异常：%s' % (d, e))
-            got = False
+            # 单日异常不中断整批：记下来，继续下一个（部分失败不影响已成功的部分）
+            tally['error'] += 1
+            print('  ✗ %s 异常：%s（已跳过，不影响前面已补齐的日期）' % (d, e))
+            continue
         if got:
-            ok += 1
+            tally['ok'] += 1
             print('  ✓ %s 已补齐' % d)
             continue
         newly, n, in_grace = mark_nontrading(d, a.grace_days)
         if in_grace:
+            tally['grace'] += 1
             print('  ✗ %s 本次没拿到（累计 %d 次）→ 还在 %d 天宽限期内，'
                   '不判定为非交易日，下次继续尝试' % (d, n, a.grace_days))
         elif newly:
+            tally['new_skip'] += 1
             print('  ✗ %s 补不到 → 已连续失败 %d 次，后续不再尝试'
                   '（误判请从 nontrading-days.json 删掉，或跑 --reset-tries）' % (d, n))
         else:
+            tally['fail'] += 1
             print('  ✗ %s 补不到（累计 %d 次；再失败一次才会跳过）' % (d, n))
 
-    left = len(missing) - ok
-    print('\n补跑完成：成功 %d / 本次尝试 %d / 仍缺 %d' % (ok, len(todo), left))
-    # ★ 退出码语义：**只要本次有进展就算成功**。
-    #   以前是「仍有缺口 → 2」，于是 daily.yml 里每跑一次都留下一条
-    #   "Process completed with exit code 2" 的红色错误注解 —— 但那不是故障，
-    #   只是「一次最多补 6 天，剩下的留给下次」，本来就是预期行为。
-    #   只有「一个都没补上」才是真异常（那时才需要人在日志里看一眼）。
-    return 0 if ok > 0 else 2
+    left = len(missing) - tally['ok']
+    print('\n' + '=' * 52)
+    print('补跑汇总（用时 %.0fs）' % (time.time() - t0))
+    print('  已补齐 %d / 本次尝试 %d' % (tally['ok'], len(todo)))
+    print('  宽限期内（下次继续）%d   单次失败 %d   新判定跳过 %d   异常 %d'
+          % (tally['grace'], tally['fail'], tally['new_skip'], tally['error']))
+    print('  总缺口 %d → 仍缺 %d（剩余留给下次运行）' % (len(missing), left))
+    print('=' * 52)
+
+    # ★ 退出码契约（工作流依赖它，不要随意改）：
+    #   0 = 正常：无缺口 / 本次有进展 / --dry 只查看
+    #   2 = 真异常：尝试了但一个都没补上（需要人看一眼日志）
+    #   仅当「全部尝试都失败且没有任何进展」才返回 2；只要补上 1 个就算成功 ——
+    #   "一次最多补 max 个，剩下的留给下次"本来就是预期行为，不该被判失败。
+    return 0 if tally['ok'] > 0 else 2
 
 
 if __name__ == '__main__':

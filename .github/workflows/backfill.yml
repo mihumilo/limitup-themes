@@ -49,21 +49,39 @@ jobs:
       # 批量重建数据时勾 reset_tries：清空「已判定非交易日」与失败计数。
       # 放在 prepare 里、生成分片之前 —— 这样分片生成读到的就是清空后的名单，
       # 所有分片看到的也是同一份（放在 transcribe 里会因矩阵并发而互相覆盖）。
+      #
+      # ★ 两个坑（都踩过，别改回去）：
+      #   ① 必须用 `--reset-only`，**不能用 `--reset-tries --dry`**。
+      #      --dry 会以 2 退出（语义是"仍有缺口"），而 Actions 用 `bash -e` 跑 step
+      #      → python 一退出，后面的 git commit/push 全都不执行，prepare 作业失败
+      #      → 依赖它的 transcribe 被跳过 → 整条回填什么都不做。
+      #      --reset-only 的退出码恒为 0。
+      #   ② 推送只是「持久化」，**本轮正确性不依赖它**：紧接着的「生成分片」读的是
+      #      本作业工作区里已经清空的文件。所以推送失败只能告警，绝不能中断作业。
+      #      另外 `git add` 也要判存在性，文件不存在时 pathspec 报错同样会中断 step。
       - name: 清空失败计数（可选）
         if: ${{ inputs.reset_tries }}
         run: |
-          python -u scripts/backfill_gaps.py --reset-tries --dry
+          python -u scripts/backfill_gaps.py --reset-only || {
+            echo "::error::清空失败计数失败"; exit 1; }
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add nontrading-days.json
+          if [ -e nontrading-days.json ]; then git add nontrading-days.json; fi
+
           if git diff --cached --quiet; then
-            echo "无变化"
+            echo "无变化（名单本来就是空的）"
           else
             git commit -m "chore: 清空非交易日判定（准备批量重建）"
+            pushed=0
             for i in 1 2 3; do
-              git pull --rebase origin main && git push && break
+              if git pull --rebase origin main && git push; then pushed=1; break; fi
               echo "第 $i 次推送失败，重试…"; sleep $((i*5))
             done
+            if [ "$pushed" != "1" ]; then
+              echo "::warning::清空结果未能推送到远端（不影响本次回填：分片生成读的是本地已清空的文件；"
+              echo "::warning::但下次定时运行可能仍读到旧名单，可重跑一次或手动提交 nontrading-days.json）"
+            fi
           fi
 
       - name: 生成分片（工作日为候选，跳过已判定非交易日）
@@ -141,6 +159,34 @@ jobs:
             python scripts/pipeline.py --range ${{ matrix.chunk.start }} ${{ matrix.chunk.end }}
           fi
 
+      # ★ 提交前先校验产出：进程若在写文件时被中断（超时 / runner 回收），
+      #   themes/<日期>.json 可能是**只写了一半的残文件**。直接提交会让坏 JSON 进仓库，
+      #   Worker 解析时报错，而且「文件已存在」还会让下次运行跳过它 —— 脏数据就永久留住了。
+      #   这里逐个 json.load 校验，坏的**删掉**（下次运行会重新尝试），好的才提交。
+      - name: 校验产出（坏 JSON 直接删除，避免提交脏数据）
+        if: matrix.chunk.start != ''
+        run: |
+          python - <<'PYEOF'
+          import glob, json, os
+          bad, good = [], 0
+          for fp in sorted(glob.glob('themes/*.json') + glob.glob('review/*.json')):
+              try:
+                  with open(fp, encoding='utf-8') as f:
+                      json.load(f)
+                  good += 1
+              except Exception as e:
+                  bad.append((fp, str(e)[:80]))
+                  try: os.remove(fp)
+                  except Exception: pass
+          print('产出校验：有效 %d 个' % good)
+          if bad:
+              for fp, why in bad:
+                  print('  ✗ 删除残缺文件 %s（%s）' % (fp, why))
+              print('::warning::本分片有 %d 个残缺产出已删除，下次运行会重新尝试' % len(bad))
+          else:
+              print('  无残缺文件 ✓')
+          PYEOF
+
       - name: 提交
         if: matrix.chunk.start != ''
         continue-on-error: true
@@ -151,12 +197,21 @@ jobs:
           for p in themes review nontrading-days.json; do
             if [ -e "$p" ]; then git add "$p"; fi
           done
+
+          # 进度：本分片实际产出了几天的主题数据（下一段日志里能一眼看到）
+          echo "本分片 themes/ 下共 $(ls themes/*.json 2>/dev/null | wc -l) 个日期文件"
+
           if git diff --cached --quiet; then
-            echo "本分片无新增"
+            echo "本分片无新增（可能已全部补齐，或本次没拿到数据）"
           else
             git commit -m "chore: 回填 ${{ matrix.chunk.start }}-${{ matrix.chunk.end }}"
+            pushed=0
             for i in 1 2 3 4 5; do
-              git pull --rebase origin main && git push && break
+              if git pull --rebase origin main && git push; then pushed=1; break; fi
               echo "第 $i 次推送失败，重试…"; sleep $((i*5))
             done
+            if [ "$pushed" != "1" ]; then
+              echo "::error::本分片的产出**未能推送到远端**（磁盘上的结果会随 runner 一起丢弃）。"
+              echo "::error::重跑一次本工作流即可；分区间、减少 shards 可降低并发推送冲突。"
+            fi
           fi

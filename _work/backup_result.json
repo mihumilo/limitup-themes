@@ -1,9 +1,0 @@
-{
- "time": "2026-09-21T22:29:38",
- "error": "disabled",
- "results": [],
- "log": [
-  "[22:29:38] INFO  备份同步开始（配置：C:\\Users\\Admin\\Documents\\GitHub\\limitup-themes\\backup.config.json）",
-  "[22:29:38] INFO  back.enabled=false，整个备份功能已关闭，直接结束"
- ]
-}
