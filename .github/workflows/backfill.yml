@@ -1,5 +1,11 @@
 name: 批量回填历史
 
+# 手动触发的批量回填（chunk 分片并行跑），日常不需要它 —— 日常靠 daily.yml。
+#
+# 与 daily.yml 同一套规则：**没有交易日历**。
+#   · 候选日期 = 周一~周五
+#   · 已在 nontrading-days.json 里的日期直接跳过（那是失败满 2 次的）
+#   · 区间内所有日期都不需要跑时，用一个"空分片"占位，避免 matrix 为空数组报错
 on:
   workflow_dispatch:
     inputs:
@@ -25,7 +31,10 @@ jobs:
     outputs:
       matrix: ${{ steps.gen.outputs.matrix }}
     steps:
-      - name: 生成分片
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 生成分片（工作日为候选，跳过已判定非交易日）
         id: gen
         run: |
           python - "${{ inputs.start_date }}" "${{ inputs.end_date }}" "${{ inputs.shards }}" <<'PYEOF' >> $GITHUB_OUTPUT
@@ -34,15 +43,35 @@ jobs:
           s = datetime.strptime(sys.argv[1], '%Y%m%d')
           e = datetime.strptime(sys.argv[2], '%Y%m%d')
           n = max(1, int(sys.argv[3]))
+          # 已取消交易日历：用「周一至周五」当候选，并跳过已判定跳过的日期
+          # （补跑拿不到的日期，由 backfill_gaps.py 失败满 2 次后写入 nontrading-days.json）
+          skip = set()
+          try:
+              with open('nontrading-days.json', encoding='utf-8') as f:
+                  skip = set(json.load(f).get('dates') or [])
+          except Exception:
+              pass
           days = []
           d = s
           while d <= e:
-              if d.weekday() < 5:
-                  days.append(d.strftime('%Y%m%d'))
+              ds = d.strftime('%Y%m%d')
+              if d.weekday() < 5 and ds not in skip:
+                  days.append(ds)
               d += timedelta(days=1)
-          k = max(1, (len(days) + n - 1) // n)
-          chunks = [days[i:i + k] for i in range(0, len(days), k)]
-          print('matrix=' + json.dumps({'chunk': [{'start': c[0], 'end': c[-1]} for c in chunks if c]}))
+          print('# 候选 %d 天（工作日；已排除 %d 个已判定跳过的日期）' % (len(days), len(skip)))
+          if not days:
+              # ★ matrix 不能是空数组，否则 Actions 会报
+              #   "Matrix must define at least one vector" 让整条工作流失败。
+              #   输出一个 start 为空串的占位分片，后面两步用 if 判断直接跳过。
+              print('# 区间内没有需要回填的日期，输出占位分片')
+              print('matrix=' + json.dumps({'chunk': [{'start': '', 'end': ''}]}))
+          else:
+              k = max(1, (len(days) + n - 1) // n)
+              chunks = [days[i:i + k] for i in range(0, len(days), k)]
+              for c in chunks:
+                  print('# 分片 %s ~ %s（%d 天）' % (c[0], c[-1], len(c)))
+              print('matrix=' + json.dumps(
+                  {'chunk': [{'start': c[0], 'end': c[-1]} for c in chunks if c]}))
           PYEOF
 
   transcribe:
@@ -68,14 +97,23 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # 区间内某天拿不到数据是正常现象（节假日/未发布），所以用 continue-on-error
+      # 而不是 `|| true` —— 前者在 UI 上仍能看出"这个分片有失败"，后者是彻底静默。
       - name: 跑转录 ${{ matrix.chunk.start }} ~ ${{ matrix.chunk.end }}
-        run: python scripts/pipeline.py --range ${{ matrix.chunk.start }} ${{ matrix.chunk.end }} || true
+        if: matrix.chunk.start != ''
+        continue-on-error: true
+        run: python scripts/pipeline.py --range ${{ matrix.chunk.start }} ${{ matrix.chunk.end }}
 
       - name: 提交
+        if: matrix.chunk.start != ''
+        continue-on-error: true
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add themes review
+          # 只 add 存在的路径（nontrading-days.json 可能还不存在）
+          for p in themes review nontrading-days.json; do
+            if [ -e "$p" ]; then git add "$p"; fi
+          done
           if git diff --cached --quiet; then
             echo "本分片无新增"
           else

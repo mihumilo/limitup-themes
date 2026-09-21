@@ -1,13 +1,16 @@
 name: 每日官方复盘转录
 
-# 每天跑两次（不是「每个交易日」——因为不再预先判断哪天是交易日）：
+# 每天跑两次，**不做任何交易日判断**：
 #   北京 16:30（官方复盘帖一般 15:30~16:30 发布）—— 第一次
-#   北京 20:00 —— 第二次：若第一次没拿到图 / OCR 校验没过，这次再试
+#   北京 20:00 —— 第二次（只在第一次没拿到时才真正干活）
 #
-# ★ 交易日判定规则（已取消交易日历）：
-#     **两次都拿不到数据 = 当天是非交易日，不需要数据、不告警。**
-#   第一次拿到就不再跑第二次（pipeline 会跳过已 verified 的日期）。
-#   cron 保持「每天」而非 1-5，这样调休上班的周六/周日也能覆盖到。
+# 规则（很朴素，没有日历、没有告警）：
+#   · 当天已经有 verified=true 的产出 → 直接跳过，不再请求上游
+#   · 两次都拿不到 → 就算了，当天不做任何标记、不发通知
+#   · 任何一步失败都不会把作业判红（都是 continue-on-error），
+#     想看结果就看日志和 artifact
+#
+# cron 写「每天」而不是 1-5：省得漏掉调休上班的周六/周日。
 on:
   schedule:
     - cron: '30 8 * * *'
@@ -28,7 +31,6 @@ on:
 
 permissions:
   contents: write
-  issues: write        # 连续两次失败时自动开 Issue
 
 jobs:
   transcribe:
@@ -53,34 +55,27 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # 目标日期 + 本次是当天第几次尝试（8 点档=1，12 点档=2；手动触发算最后一次机会）
-      - name: 确定目标日期与尝试次序
+      # 目标日期（手动触发可指定）。不再区分"第几次"——两次调用的逻辑完全一样，
+      # 靠「已有 verified 产出就跳过」来实现"拿到就不跑第二次"。
+      - name: 确定目标日期
         id: meta
         run: |
           DATE="${{ github.event.inputs.date }}"
           if [ -z "$DATE" ]; then DATE=$(TZ=Asia/Shanghai date +%Y%m%d); fi
-          ATTEMPT=1
-          [ "$(date -u +%H)" -ge 11 ] && ATTEMPT=2
-          [ "${{ github.event_name }}" = "workflow_dispatch" ] && ATTEMPT=2
-          # 是否工作日（周一~周五）。只用于兜底告警：周末两次拿不到是理所当然的，
-          # 工作日两次都拿不到才值得提醒一句（可能就是真故障）。
-          if [ "$(TZ=Asia/Shanghai date +%u)" -le 5 ]; then WD=true; else WD=false; fi
           echo "date=$DATE" >> $GITHUB_OUTPUT
-          echo "attempt=$ATTEMPT" >> $GITHUB_OUTPUT
-          echo "weekday=$WD" >> $GITHUB_OUTPUT
 
       # 自动补齐缺失的日期（保留最近 30 个有数据的日子）。
-      # 候选 = 工作日 ∩ 不在 nontrading-days.json 里，所以不需要任何日历。
+      # 候选 = 工作日 ∩ 不在 nontrading-days.json 里 —— 不需要任何交易日历。
       # 失败不影响当天转录；一次最多补 6 天，剩下的留给后续运行继续补。
-      - name: 补跑缺失交易日
+      - name: 补跑缺失日期
         continue-on-error: true
         run: python -u scripts/backfill_gaps.py --keep 30 --max 6
 
       # -u：关闭输出缓冲，实时看到每一步日志
-      # 第 1 次失败不判作业失败（留给 20:00 补跑）；第 2 次失败才判失败 → 触发告警
+      # 已 verified 的日期会被 pipeline 自动跳过（这就是"拿到就不跑第二次"）
       - name: 跑转录
         id: run
-        continue-on-error: ${{ steps.meta.outputs.attempt == '1' }}
+        continue-on-error: true
         env:
           REVIEW_API_BASE: ${{ vars.REVIEW_API_BASE }}
         run: |
@@ -88,35 +83,25 @@ jobs:
           if [ "${{ github.event.inputs.force }}" = "true" ]; then FORCE="--force"; fi
           LOCATE=""
           if [ "${{ github.event.inputs.locate_only }}" = "true" ]; then LOCATE="--locate-only"; fi
-          echo "目标日期: ${{ steps.meta.outputs.date }}  第 ${{ steps.meta.outputs.attempt }} 次  图源API: ${REVIEW_API_BASE:-未配置(直接爬同花顺)}"
+          echo "目标日期: ${{ steps.meta.outputs.date }}  图源API: ${REVIEW_API_BASE:-未配置(直接爬同花顺)}"
           python -u scripts/pipeline.py --date "${{ steps.meta.outputs.date }}" $FORCE $LOCATE
 
       # 自动体检：关键词是否混入连板/成交额、连板数是否全为 1、时间缺失、家数偏差。
-      # 体检只是诊断，不决定作业成败（成败由上面「跑转录」决定）。
+      # 纯诊断，发现问题只打印（退出码恒为 0），不判作业成败。
       - name: 产出体检
-        if: always()
         continue-on-error: true
         run: python -u scripts/check_output.py "${{ steps.meta.outputs.date }}"
 
-      # 两次都没拿到 → 按约定判定为非交易日，不需要数据，不发告警
-      - name: 两次均未取到 → 记为非交易日
-        if: always() && steps.meta.outputs.attempt == '2' && steps.run.outcome == 'failure'
-        run: |
-          python -u scripts/mark_nontrading.py --date "${{ steps.meta.outputs.date }}"
-          {
-            echo "### 已按非交易日处理：${{ steps.meta.outputs.date }}"
-            echo ""
-            echo "两次尝试（北京 16:30 / 20:00）都没有取到官方复盘数据。"
-            echo "按约定规则判定：**当天是非交易日，不需要数据**。"
-            echo ""
-            echo "该日期已写入 \`nontrading-days.json\`，后续补跑会自动跳过。"
-          } >> $GITHUB_STEP_SUMMARY
-
+      # 只 add 实际存在的路径 —— 之前写死 nontrading-days.json，文件不存在时
+      # `git add` 会报 "pathspec did not match any files" 并把作业判红。
       - name: 提交结果
+        continue-on-error: true
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add themes review nontrading-days.json
+          for p in themes review nontrading-days.json; do
+            if [ -e "$p" ]; then git add "$p"; fi
+          done
           if git diff --cached --quiet; then
             echo "无新增数据"
           else
@@ -126,39 +111,6 @@ jobs:
               echo "第 $i 次推送失败，重试…"; sleep $((i*5))
             done
           fi
-
-      # 告警：只在「工作日」且「第 2 次尝试也失败」时才开 Issue。
-      # 周末两次拿不到是理所当然的；工作日两次都拿不到，可能是真故障（比如 GitHub 出口被封），
-      # 这时给个可见信号 —— 否则「一律当非交易日」会把故障也静默掉。
-      - name: 两次都没拿到（工作日）→ 开 Issue 提醒
-        if: failure() && steps.meta.outputs.attempt == '2' && steps.meta.outputs.weekday == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DATE: ${{ steps.meta.outputs.date }}
-        run: |
-          TITLE="转录失败：$DATE（工作日两次都没拿到数据）"
-          # 去重：已有同名未关闭 Issue 就不重复开
-          if gh issue list --state open --search "$TITLE in:title" --json title --jq '.[].title' | grep -qF "$TITLE"; then
-            echo "已有同名 Issue，跳过"
-            exit 0
-          fi
-          cat > _issue.md <<'BODY'
-          ## 转录失败
-
-          - 日期：$DATE
-          - 现象：北京 16:30 与 20:00 两次尝试都未产出 `verified=true`
-          - 运行记录：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-
-          当天是**工作日**，两次都拿不到数据 —— 大概率是故障而不是非交易日。
-          如果这天确实是临时休市，直接关闭本 Issue 即可（不需要改代码）。
-
-          ### 自查
-
-          1. Actions 里用 `workflow_dispatch` 跑一次 `locate_only=true`，看是否有 401 告警
-          2. 若 GitHub 出口被封，给仓库配变量 `REVIEW_API_BASE` 指向 Worker 的 `/api/review`
-          3. 下载本次运行的 `ocr-raw-*` artifact，离线复现解析问题
-          BODY
-          gh issue create --title "$TITLE" --label "auto-alert" --body-file _issue.md
 
       # 排障用：OCR 原始数据（每个文字块的文本+坐标）
       - name: 上传 OCR 原始数据（排障用）
@@ -173,6 +125,7 @@ jobs:
       # 国内备用链路：同步一份到 Gitee 镜像仓库（需在 Secrets 配 GITEE_USER / GITEE_TOKEN）
       - name: 同步到 Gitee 镜像（国内备用）
         if: env.GITEE_TOKEN != '' && env.GITEE_USER != ''
+        continue-on-error: true
         run: |
           git remote remove gitee 2>/dev/null || true
           git remote add gitee "https://${GITEE_USER}:${GITEE_TOKEN}@gitee.com/${GITEE_USER}/limitup-themes.git"

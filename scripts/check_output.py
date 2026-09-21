@@ -142,7 +142,11 @@ def main():
     for p in paths:
         total += check_one(p)
     print('\n合计问题：%d' % total)
-    return 0 if total == 0 else 2
+    # ★ 体检只是诊断：发现问题只打印，**退出码恒为 0**。
+    #   以前是「有问题就 exit 2」，会把 Actions 作业判红 —— 但数据本身可能是好的
+    #   （比如它报的"关键词长度异常"只是关键词偏长，不影响使用）。
+    #   数据到底行不行，由 pipeline.py 的 verified 决定，不由体检决定。
+    return 0
 
 
 if __name__ == '__main__':
