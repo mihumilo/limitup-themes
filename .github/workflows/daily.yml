@@ -35,11 +35,6 @@ permissions:
 jobs:
   transcribe:
     runs-on: ubuntu-latest
-    # secrets 不能直接用在 step 的 if: 表达式里（会被判 Invalid workflow），
-    # 统一先注入 job 级 env，if 里用 env.* 判断，run 里用 shell 变量引用
-    env:
-      GITEE_USER: ${{ secrets.GITEE_USER }}
-      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
     steps:
       - name: 检出仓库
         uses: actions/checkout@v4
@@ -54,6 +49,14 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+
+      # 解析回归自测：纯内存构造坐标，不联网、不 OCR，几秒跑完。
+      # ★ 以前这个脚本只在本地手跑，改坏了 parser 要等到产出数据异常才发现。
+      #   放进 CI 后每次运行都会验证；失败只告警不判红（continue-on-error）。
+      #   themes/ 为空时「规模仿真」会自动跳过（脚本里已处理）。
+      - name: 解析回归自测
+        continue-on-error: true
+        run: python -u scripts/test_parse.py
 
       # 目标日期（手动触发可指定）。不再区分"第几次"——两次调用的逻辑完全一样，
       # 靠「已有 verified 产出就跳过」来实现"拿到就不跑第二次"。
@@ -113,6 +116,14 @@ jobs:
           fi
 
       # 排障用：OCR 原始数据（每个文字块的文本+坐标）
+      # 数据备份同步：目标由仓库根的 backup.config.json 指定（本地目录 / 任意 git 远端）。
+      # 默认 enabled=false，什么都不做；配好目标后才会真正同步。凭据走 Secrets → 环境变量。
+      - name: 数据备份同步
+        continue-on-error: true
+        env:
+          BACKUP_GIT_TOKEN: ${{ secrets.BACKUP_GIT_TOKEN }}
+        run: python -u scripts/backup_sync.py
+
       - name: 上传 OCR 原始数据（排障用）
         if: always()
         uses: actions/upload-artifact@v4
@@ -121,12 +132,3 @@ jobs:
           path: _work/ocr_*.json
           if-no-files-found: ignore
           retention-days: 7
-
-      # 国内备用链路：同步一份到 Gitee 镜像仓库（需在 Secrets 配 GITEE_USER / GITEE_TOKEN）
-      - name: 同步到 Gitee 镜像（国内备用）
-        if: env.GITEE_TOKEN != '' && env.GITEE_USER != ''
-        continue-on-error: true
-        run: |
-          git remote remove gitee 2>/dev/null || true
-          git remote add gitee "https://${GITEE_USER}:${GITEE_TOKEN}@gitee.com/${GITEE_USER}/limitup-themes.git"
-          git push gitee HEAD:main --force || echo "Gitee 同步失败（不影响主流程）"

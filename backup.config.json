@@ -1,0 +1,40 @@
+{
+  "_说明": [
+    "数据备份同步配置（scripts/backup_sync.py 读取）。",
+    "enabled=false 时整个备份功能关闭（脚本直接返回 0，什么都不做）。",
+    "include：要备份的路径（相对仓库根）。",
+    "targets：备份目标数组，可配多个，互不干扰；某个失败不影响其它。",
+    "type=local：写到本地/挂载目录，生成 <path>/<时间戳>/ 快照 + latest/，按 keep_snapshots 轮转。",
+    "type=git ：推到任意 git 远端（每次全新 clone，避开浅克隆推送被拒的问题）。",
+    "★ 字符串里的 ${VAR} 会替换成环境变量 —— 凭据一律走环境变量，不要写进本文件。",
+    "★ 本文件会被提交到公开仓库：请只放路径/分支等非敏感信息。"
+  ],
+
+  "enabled": false,
+  "include": ["themes", "review", "nontrading-days.json"],
+
+  "targets": [
+    {
+      "name": "local-nas",
+      "type": "local",
+      "enabled": false,
+      "path": "D:/backup/limitup-themes",
+      "keep_snapshots": 7,
+      "_备注": "把 enabled 改成 true 并填 path 即可。在 GitHub Actions 上跑时这个目录是临时的、会被丢弃，仅适合在你自己的机器上跑脚本。"
+    },
+    {
+      "name": "mirror-git",
+      "type": "git",
+      "enabled": false,
+      "url": "https://oauth2:${BACKUP_GIT_TOKEN}@git.example.com/你的账号/limitup-themes.git",
+      "branch": "main",
+      "user": "backup-bot",
+      "email": "backup-bot@example.com",
+      "_备注": [
+        "把 url 换成你的备份远端，并把 enabled 改成 true。",
+        "BACKUP_GIT_TOKEN 在 GitHub 仓库 Settings → Secrets 里配置（ Actions 里由 daily.yml 传入环境变量）。",
+        "url 里的凭据会自动打码后再打印到日志，不会泄漏。"
+      ]
+    }
+  ]
+}

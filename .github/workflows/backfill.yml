@@ -28,6 +28,11 @@ on:
         required: false
         type: boolean
         default: false
+      reset_tries:
+        description: '先清空 nontrading-days.json 的失败计数与已判定名单（批量重建数据时勾）'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -40,6 +45,26 @@ jobs:
     steps:
       - name: 检出仓库
         uses: actions/checkout@v4
+
+      # 批量重建数据时勾 reset_tries：清空「已判定非交易日」与失败计数。
+      # 放在 prepare 里、生成分片之前 —— 这样分片生成读到的就是清空后的名单，
+      # 所有分片看到的也是同一份（放在 transcribe 里会因矩阵并发而互相覆盖）。
+      - name: 清空失败计数（可选）
+        if: ${{ inputs.reset_tries }}
+        run: |
+          python -u scripts/backfill_gaps.py --reset-tries --dry
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add nontrading-days.json
+          if git diff --cached --quiet; then
+            echo "无变化"
+          else
+            git commit -m "chore: 清空非交易日判定（准备批量重建）"
+            for i in 1 2 3; do
+              git pull --rebase origin main && git push && break
+              echo "第 $i 次推送失败，重试…"; sleep $((i*5))
+            done
+          fi
 
       - name: 生成分片（工作日为候选，跳过已判定非交易日）
         id: gen

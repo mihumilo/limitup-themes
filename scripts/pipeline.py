@@ -540,7 +540,7 @@ def is_field_noise(s):
     return False
 
 
-def classify(items, width=1921, prof=None):
+def classify(items, width=1921, prof=None, stats=None):
     """按「格式 + 列位置」分流，避免把成交额误当关键词。
 
     注意：必须**按单张图**调用（每张图的 y 都从 0 开始），否则行锚点会互相穿插。
@@ -609,8 +609,24 @@ def classify(items, width=1921, prof=None):
             d = min(d, y - code_ys[i - 1])
         return d
 
+    # ★ 行间距随图缩放：窄图（实测 730~1160 宽）上文字更小、行更密，
+    #   写死 120px 会把真标题判成"落在股票行上" —— 这是 8/12、8/17 那几个窄图
+    #   日期标题大量丢失的直接原因（宽图 1900+ 上 120px 完全够用，所以一直没暴露）。
+    #   改成用「相邻股票代码中位数间距」的比例值：宽图算出来≈120，与历史经验一致；
+    #   窄图自动收紧到 50~120 之间。夹住上下限，避免过松（误判正文）或过紧（漏标题）。
+    _spac = sorted(code_ys[i + 1] - code_ys[i] for i in range(len(code_ys) - 1))
+    # 门槛取 2：3 只股票就能给出 2 个间距，够了（原来写 3，需要 4 只股票才生效）
+    if len(_spac) >= 2:
+        _med_spac = _spac[len(_spac) // 2]
+        row_gap = max(50, min(TITLE_MIN_GAP, int(_med_spac * 0.25)))
+    else:
+        _med_spac, row_gap = None, TITLE_MIN_GAP
+    if stats is not None:
+        stats['row_gap'] = row_gap
+        stats['med_spacing'] = _med_spac
+
     def on_stock_row(y):
-        return dist_to_code(y) < TITLE_MIN_GAP
+        return dist_to_code(y) < row_gap
 
     # ---- 标题兜底（rescue）：标题被 OCR 切碎时（如「大消费」+「*11」分成两块），
     #      在中央区域找短中文块救回来。硬条件：
@@ -758,10 +774,21 @@ def parse_rows(items, pool=None, width=None):
         sub = by_file[fn]
         # ★ 每张图各自算宽度（不能全图共用一个值，见 image_width 的说明）
         w_img = width or image_width(fn) or image_width_fallback(sub)
-        titles, codes, times, streaks, keywords, names, amounts, _ = classify(sub, w_img, prof)
+        # ★ 列定位同样按图算：注释曾假设"列位置全图一致"，但实测同一天的三张图
+        #   宽度能差 27%（如 928 / 730 / 915），全局列位置会让窄图的「名称/关键词」
+        #   分流错位，标题碎片进错桶 → rescue 找不到它。单图样本不足时回落全局值。
+        p_img = column_profile(sub)
+        p_use = p_img if (p_img and p_img.get('time') is not None) else prof
+        st = {}
+        titles, codes, times, streaks, keywords, names, amounts, _ = classify(sub, w_img, p_use, st)
         titles.sort(key=lambda t: t['y'])
         codes.sort(key=lambda c: (c['y'], c['x']))
-        print('  [%s] 宽 %d 标题 %d 个 / 代码 %d 个' % (fn, w_img, len(titles), len(codes)))
+        print('  [%s] 宽 %d 标题 %d 个 / 代码 %d 个'
+              '  ｜列x 时%s/额%s/板%s  ｜行距中位 %s → 独占行判据 %dpx'
+              % (fn, w_img, len(titles), len(codes),
+                 p_use.get('time'), p_use.get('amount'), p_use.get('streak'),
+                 st.get('med_spacing') if st.get('med_spacing') is not None else '-',
+                 st.get('row_gap', TITLE_MIN_GAP)))
         print('        标题：%s' % '；'.join(
             '%s[y=%d,%s,图注%d]' % (t['name'], t['y'], t.get('src', '?'), t.get('declare', 0))
             for t in titles) or '        标题：（无）')

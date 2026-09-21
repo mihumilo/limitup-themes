@@ -1,0 +1,55 @@
+name: 解析回归自测
+
+# 改了 scripts/ 下的解析逻辑，push 或 PR 时立刻跑一遍回归自测。
+# 纯内存构造坐标，不联网、不做 OCR，几十秒完成。
+#
+# 覆盖的真实事故：
+#   ① 标题居中带写死 1921 → 窄图（960/1056/1152/1440）标题全漏
+#      （曾导致 11 个日期数据错、1 个日期完全空）
+#   ② 标题被 OCR 切成「名」+「*N」两块时救不回来
+#   ③ 跨图延续：一张长图的最后一行不能和下一张的第一行拼成一行
+#
+# 用例里保留了「写死 1921」的对照组：它必须失败，
+# 否则说明用例本身失效了（抓不住老 bug）。
+on:
+  push:
+    paths:
+      - 'scripts/**'
+      - 'requirements.txt'
+      - '.github/workflows/test.yml'
+  pull_request:
+    paths:
+      - 'scripts/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 准备 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # 自测脚本对缺依赖是宽容的（requests/PIL 缺失时会自动 stub），
+      # 但装全更接近真实环境。
+      - name: 跑回归自测
+        run: python -u scripts/test_parse.py
+
+      # 顺带确认所有脚本语法正常（避免只有真正跑到那一行才炸）
+      - name: 语法编译检查
+        run: |
+          python -m compileall -q scripts
+          echo "全部脚本编译通过"

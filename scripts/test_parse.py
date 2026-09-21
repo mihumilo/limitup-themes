@@ -424,5 +424,54 @@ if P.classify(narrow2, 1921, P.column_profile(narrow2))[0]:
     print('  [FAIL] 老逻辑（1921）在窄图上竟然能救回 —— 用例没复现出原 bug')
     ok = False
 
+print('\n[7] 窄图行距更密时，「独占一行」判据应随行距缩放（8/12、8/17 的实际故障）')
+# 场景：图宽 1024（窄图），文字更小 → 行距只有 320px（宽图约 576px）。
+#   标题放在距上一只代码 100px 处：
+#     · 写死 120px 判据 → 100 < 120，被误判成「在股票行上」→ 标题丢失
+#     · 数据驱动判据 → 320*0.25 = 100 ... 用 90px 拉开距离以便稳定区分
+_narrow = []
+
+def nadd(x, t, yy):
+    _narrow.append(('n.png', 0, yy, x, t))
+
+# 三只股票，**行距 320**（宽图约 576）：代码行 y = 230 / 550 / 870
+for _i, _y0 in enumerate((200, 520, 840)):
+    nadd(45, '股票%d' % _i, _y0)
+    nadd(45, '00%04d' % (_i + 1), _y0 + 30)
+    nadd(200, '1.2亿', _y0 + 30)
+    nadd(290, '09:3%d:00' % _i, _y0 + 30)
+    nadd(360, '首板', _y0 + 30)
+    nadd(430, '关键词%d' % _i, _y0 + 30)
+
+# 标题放在两只股票之间、距上一只代码行 100px：
+#   数据驱动判据 = 320*0.25 = 80 → 100 > 80 → 认（正确）
+#   写死 120 判据            → 100 < 120 → 丢（这正是 8/12、8/17 的故障）
+nadd(512, '维生素', 330)
+nadd(600, '*3', 330)
+
+# 杂质：长在股票行上的短词（距代码行 0px），必须被拒
+nadd(512, '业绩增长', 230)
+
+_t7, _c7 = P.classify(_narrow, 1024, P.column_profile(_narrow))[0:2]
+_names7 = sorted(t['name'] for t in _t7)
+if _names7 == ['维生素']:
+    print('  窄图(1024) 行距 320 → 标题 %s ✓' % _names7)
+else:
+    print('  [FAIL] 窄图标题应为 [维生素]，实际 %s' % _names7)
+    ok = False
+# 对照：同样布局放在宽图上（x 按比例放大到 1921）也必须成立
+_wide = [(f, si, y, int(x * 1921 / 1024), t) for (f, si, y, x, t) in _narrow]
+_t7w = P.classify(_wide, 1921, P.column_profile(_wide))[0]
+if sorted(t['name'] for t in _t7w) == ['维生素']:
+    print('  宽图(1921) 同布局 → 标题 %s ✓' % sorted(t['name'] for t in _t7w))
+else:
+    print('  [FAIL] 宽图标题应为 [维生素]，实际 %s' % sorted(t['name'] for t in _t7w))
+    ok = False
+if '业绩增长' in _names7:
+    print('  [FAIL] 股票行上的杂质「业绩增长」被误当成标题')
+    ok = False
+else:
+    print('  股票行上的杂质未被误认 ✓')
+
 print('\n自测结论:', '全部通过' if ok else '存在失败项')
 sys.exit(0 if ok else 1)

@@ -18,9 +18,6 @@ permissions:
 jobs:
   cleanup:
     runs-on: ubuntu-latest
-    env:
-      GITEE_USER: ${{ secrets.GITEE_USER }}
-      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
     steps:
       - name: 检出仓库
         uses: actions/checkout@v4
@@ -47,6 +44,7 @@ jobs:
           done
 
       - name: 提交删除结果
+        continue-on-error: true
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -55,13 +53,9 @@ jobs:
             echo "无变化"
           else
             git commit -m "chore: 清理历史 JSON（保留最近 30 个交易日）$(TZ=Asia/Shanghai date +%Y-%m-%d)"
-            git push
+            # 与 daily/backfill 一致：推送失败重试（并发运行时 origin 可能已经前移）
+            for i in 1 2 3; do
+              git pull --rebase origin main && git push && break
+              echo "第 $i 次推送失败，重试…"; sleep $((i*5))
+            done
           fi
-
-      # 与 Gitee 镜像保持一致（未配 Secrets 则自动跳过）
-      - name: 同步删除到 Gitee 镜像
-        if: env.GITEE_TOKEN != '' && env.GITEE_USER != ''
-        run: |
-          git remote remove gitee 2>/dev/null || true
-          git remote add gitee "https://${GITEE_USER}:${GITEE_TOKEN}@gitee.com/${GITEE_USER}/limitup-themes.git"
-          git push gitee HEAD:main --force || echo "Gitee 同步失败（不影响主流程）"
