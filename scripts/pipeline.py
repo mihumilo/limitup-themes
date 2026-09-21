@@ -556,8 +556,9 @@ def classify(items, width=1921, prof=None):
         if prof['streak'] is not None and prof['streak'] > prof['time']:
             kw_lo = max(kw_lo, prof['streak'] + 20)
         kw_hi = prof['time'] + 430
-    tx0, tx1 = width * 0.30, width * 0.70    # 标题居中带
-    rx0, rx1 = width * 0.35, width * 0.65    # 救援候选的居中带（更严）
+    w = width or 1921                        # 调用方必须传**本图**的真实宽度
+    tx0, tx1 = w * 0.30, w * 0.70            # 标题居中带
+    rx0, rx1 = w * 0.35, w * 0.65            # 救援候选的居中带（更严）
     titles, codes, times, streaks, keywords, names, amounts = [], [], [], [], [], [], []
     for it in items:
         f, si, y, x, t = it
@@ -611,32 +612,54 @@ def classify(items, width=1921, prof=None):
     def on_stock_row(y):
         return dist_to_code(y) < TITLE_MIN_GAP
 
-    # ---- 标题兜底（rescue）：标题被 OCR 切碎时（如「大消费」+「*10」分成两块），
-    #      在中央区域找与历史官方主题名匹配的短中文块救回来。三个硬条件：
-    #      ① 先验匹配：命中历史官方主题词表（精确/前缀/编辑距离≤1）
-    #      ② 必带图注家数：真标题一定有「*N」，正文里的同名杂质没有
-    #         —— 上一版的假标题（海峡两岸 / 控制权变更 / 军工通信 / 光伏玻璃）
-    #            全是图注 0，被这条全部拒掉
-    #      ③ 行独占 + 居中
-    for n in names:
+    # ---- 标题兜底（rescue）：标题被 OCR 切碎时（如「大消费」+「*11」分成两块），
+    #      在中央区域找短中文块救回来。硬条件：
+    #      ① 行独占 + 「名称 + 图注」整体居中（几何特征，不随图宽变）
+    #      ② 必带图注家数「*N」—— 上一版的假标题（海峡两岸 / 控制权变更 / 军工通信 /
+    #         光伏玻璃）全是图注 0，被这条全部拒掉
+    #      ③ 词表命中：**带星号的图注**（`*11`）本身就是强信号，这种情况不再要求词表
+    #         （否则 8 月那种"新主题 + 标题被切碎"的组合永远救不回来）；
+    #         不带星号时仍要求命中词表，避免把正文里的短词误当标题
+    #  ★ 候选来源必须是 names + keywords：标题「大消费」落在中央，横坐标正好在
+    #    关键词列的区间里，classify 会把它收进 keywords —— 只看 names 就永远找不到它。
+    _rescue_cands = list(names) + [k for k in keywords
+                                   if (k['y'], k['x'], k['v']) not in
+                                   {(n['y'], n['x'], n['v']) for n in names}]
+    for n in _rescue_cands:
         if not (rx0 <= n['x'] <= rx1) or not (2 <= len(n['v']) <= 14):
-            continue
-        if theme_prior(n['v']) < 1:
             continue
         if on_stock_row(n['y']):
             continue
         if any(_norm_theme(t['name']) == _norm_theme(n['v']) for t in titles):
             continue
+        prior = theme_prior(n['v'])
         declare = 0
+        starred = False
         for it in items:
-            s = it[4].replace(' ', '').lstrip('*＊✱x×X·•・')
-            if not (NUM13_RE.match(s) and rx0 <= it[3] <= rx1):
+            raw = it[4].replace(' ', '')
+            s = raw.lstrip('*＊✱x×X·•・')
+            if not NUM13_RE.match(s):
                 continue
-            if abs(it[2] - n['y']) <= 30 and 0 < it[3] - n['x'] <= 110:
-                declare = int(s)
-                break
+            if abs(it[2] - n['y']) > 30:
+                continue
+            dx = it[3] - n['x']
+            # 图注在标题名右侧、距离不超过图宽的 1/4（容纳「名 + *N」整块）
+            if not (0 < dx <= w * 0.25):
+                continue
+            # ★ 真正的判据：「标题名 + 图注」的**整体中点**必须落在这张图的居中带里。
+            #   以前写的是「名称到图注距离 ≤110px」——那是拿 1921 宽图的字号当标准，
+            #   窄图（960/1056/1152）上「大消费 + *11」的间距能到 200px 上下，
+            #   于是真标题被整条挡掉（8/12 顶部那个标题就是这么丢的）。
+            #   而「整体居中」是不随图宽变化的几何特征，用它才稳。
+            if not (tx0 <= (n['x'] + it[3]) / 2.0 <= tx1):
+                continue
+            declare = int(s)
+            starred = raw[:1] in ('*', '＊', '✱')
+            break
         if declare <= 0:
             continue
+        if not starred and prior < 1:
+            continue          # 没有星号图注时，仍要命中历史主题词表才认
         titles.append({'y': n['y'], 'x': n['x'], 'name': n['v'],
                        'declare': declare, 'src': 'rescue'})
 
@@ -670,7 +693,34 @@ def pick(cands, y, x_min=None, dx=ROW_TOL, right_only=False):
     return best
 
 
-def parse_rows(items, pool=None, width=1921):
+def image_width(fn):
+    """该图片的真实像素宽度。
+
+    ★ 为什么必须按图算：长图的宽度并不固定 —— 实测同一天的三张图可能是
+      1152 / 1056 / 1152，也有 960、1440、1921 各种宽度。
+      以前这里写死 1921，于是「标题居中带」= 576~1345：
+        · 宽 1152 的图，正确带是 346~806 → 只有 576~806 这段还能命中
+        · 宽 1056 的图，正确带是 317~739 → 标题（x≈528）**全部落在带外**
+      后果：那天的标题被整张漏掉，个股全被塞进上一个主题，
+      家数校验必然不过（verified=false）—— 8/12、8/17、8/18 就是这么失败的。
+    """
+    try:
+        with Image.open(fn) as im:
+            return int(im.size[0])
+    except Exception:
+        return None
+
+
+def image_width_fallback(sub_items):
+    """图文件不在时的退化方案（--from-ocr 复用缓存、或图已清理）：
+    用本图所有文字块的 x 上限反推图宽（右侧一般还剩一点留白）。"""
+    xs = [it[3] for it in sub_items]
+    if not xs:
+        return 1921
+    return int(max(xs) * 1.06)
+
+
+def parse_rows(items, pool=None, width=None):
     """按坐标还原「主题 -> 个股明细」
 
     与旧版的关键区别（旧版用『最近匹配』，会把成交额当关键词、把上一行名称串到本行）：
@@ -706,13 +756,20 @@ def parse_rows(items, pool=None, width=1921):
 
     for fn in files:
         sub = by_file[fn]
-        titles, codes, times, streaks, keywords, names, amounts, _ = classify(sub, width, prof)
+        # ★ 每张图各自算宽度（不能全图共用一个值，见 image_width 的说明）
+        w_img = width or image_width(fn) or image_width_fallback(sub)
+        titles, codes, times, streaks, keywords, names, amounts, _ = classify(sub, w_img, prof)
         titles.sort(key=lambda t: t['y'])
         codes.sort(key=lambda c: (c['y'], c['x']))
-        print('  [%s] 标题 %d 个 / 代码 %d 个' % (fn, len(titles), len(codes)))
+        print('  [%s] 宽 %d 标题 %d 个 / 代码 %d 个' % (fn, w_img, len(titles), len(codes)))
         print('        标题：%s' % '；'.join(
             '%s[y=%d,%s,图注%d]' % (t['name'], t['y'], t.get('src', '?'), t.get('declare', 0))
             for t in titles) or '        标题：（无）')
+        # 自检：图里有卡片却一个标题都没有 → 多半是宽度/版式导致的标题漏识别，
+        # 一旦发生，这张图的个股会全部被塞进上一个主题，家数校验必然失败。
+        if len(codes) >= 5 and not titles:
+            print('    [warn] 本图有 %d 个代码但标题 0 个 —— 可能是标题居中带与实际图宽不符'
+                  '（当前按宽 %d 计算），或该图版式特殊' % (len(codes), w_img))
 
         for t in titles:
             if t['name'] not in by_name:

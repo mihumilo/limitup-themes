@@ -6,6 +6,8 @@ name: 批量回填历史
 #   · 候选日期 = 周一~周五
 #   · 已在 nontrading-days.json 里的日期直接跳过（那是失败满 2 次的）
 #   · 区间内所有日期都不需要跑时，用一个"空分片"占位，避免 matrix 为空数组报错
+#   · ★ force=true 才会重跑「已存在且 verified=true」的日期。
+#     修历史坏数据必须勾它 —— 否则会被 run_one 的幂等跳过，永远修不好
 on:
   workflow_dispatch:
     inputs:
@@ -21,6 +23,11 @@ on:
         description: '并行分片数'
         required: false
         default: '8'
+      force:
+        description: '强制重跑（忽略已存在且已校验的结果）'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -102,7 +109,12 @@ jobs:
       - name: 跑转录 ${{ matrix.chunk.start }} ~ ${{ matrix.chunk.end }}
         if: matrix.chunk.start != ''
         continue-on-error: true
-        run: python scripts/pipeline.py --range ${{ matrix.chunk.start }} ${{ matrix.chunk.end }}
+        run: |
+          if [ "${{ inputs.force }}" = "true" ]; then
+            python scripts/pipeline.py --range ${{ matrix.chunk.start }} ${{ matrix.chunk.end }} --force
+          else
+            python scripts/pipeline.py --range ${{ matrix.chunk.start }} ${{ matrix.chunk.end }}
+          fi
 
       - name: 提交
         if: matrix.chunk.start != ''

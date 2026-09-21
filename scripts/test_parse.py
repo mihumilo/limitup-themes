@@ -13,12 +13,30 @@
 """
 import os
 import sys
+import types
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
     sys.stdout.reconfigure(encoding='utf-8')
 except Exception:
     pass
+
+# 本测试只驱动解析逻辑（不联网、不读图），但 pipeline 顶层 import requests/PIL。
+# 本地/CI 若没装这两个包，用空模块顶上，免得测试因为环境问题跑不起来。
+for _m in ('requests',):
+    try:
+        __import__(_m)
+    except ImportError:
+        sys.modules[_m] = types.ModuleType(_m)
+try:
+    import PIL.Image  # noqa: F401
+except ImportError:
+    _pil = types.ModuleType('PIL')
+    _pilimg = types.ModuleType('PIL.Image')
+    _pil.Image = _pilimg
+    sys.modules['PIL'] = _pil
+    sys.modules['PIL.Image'] = _pilimg
+
 import pipeline as P
 
 W = 1921
@@ -338,6 +356,73 @@ else:
     print('  %s 字段比对%s' % ('[OK]' if fbad == 0 else '[FAIL]',
                             '全对' if fbad == 0 else (' 有 %d 处不一致' % fbad)))
     ok = ok and fbad == 0
+
+# ---- ⑤ 标题居中带必须按「本图」宽度算（2026-08-12 整张图标题漏识别的根因）----
+#   长图宽度并不固定：实测 1152 / 1056 / 960 / 1440 / 1921 都出现过。
+#   以前 classify 收到的 width 是写死的 1921，于是「居中带」恒为 576~1345：
+#   · 宽 1152 的图正确带是 346~806，只剩 576~806 还能命中
+#   · 宽 1056 的图正确带是 317~739，标题(x≈528) 全部落在带外 → 整张漏掉
+print('\n[5] 标题居中带按图宽自适应')
+for img_w in (1152, 1056, 960, 1440, 1921):
+    x_title = int(img_w * 0.5)                    # 标题居中
+    fake = [
+        ('w%d.png' % img_w, 0, 100, x_title, '维生素*3'),
+        ('w%d.png' % img_w, 0, 400, 60, '600000'),
+        ('w%d.png' % img_w, 0, 400, 320, '09:31'),
+        ('w%d.png' % img_w, 0, 400, 380, '首板'),
+        ('w%d.png' % img_w, 0, 400, 420, '维生素'),
+    ]
+    prof = P.column_profile(fake)
+    got_new = [t['name'] for t in P.classify(fake, img_w, prof)[0]]
+    got_old = [t['name'] for t in P.classify(fake, 1921, prof)[0]]
+    print('  宽 %-5d 按图宽→%-6s 按写死的1921→%s'
+          % (img_w, (got_new or ['无'])[0], (got_old or ['无'])[0]))
+    if not got_new:
+        print('  [FAIL] 宽 %d 的图按真实宽度仍识别不到标题' % img_w)
+        ok = False
+# 顺带验证：窄图上「写死 1921」确实会漏（说明这个测试真的能抓住老 bug）
+narrow = [('n.png', 0, 100, 528, '维生素*3'),
+          ('n.png', 0, 400, 60, '600000'),
+          ('n.png', 0, 400, 320, '09:31'),
+          ('n.png', 0, 400, 380, '首板'),
+          ('n.png', 0, 400, 420, '维生素')]
+if P.classify(narrow, 1921, P.column_profile(narrow))[0]:
+    print('  [FAIL] 写死 1921 时窄图标题竟然没被漏掉 —— 测试用例本身失效了')
+    ok = False
+
+# ---- ⑥ 标题被 OCR 切成「名」+「*N」两块（8/12 图0 顶部「大消费*11」就是这么丢的）----
+#   rescue 的三个条件里，原来「名称到图注距离 ≤110px」是按 1921 宽图的字号定的，
+#   窄图上「大消费 + *11」的间距能到 200px 上下 → 真标题被整条挡掉。
+#   现在改用「整体中点是否居中」（不随图宽变化的几何特征）。
+print('\n[6] 窄图上标题被切成两块时能否救回（「名」+「*N」）')
+CASES = [(1152, 480, 690), (1056, 440, 630), (960, 400, 575), (1440, 600, 860), (1921, 800, 1150)]
+for img_w, name_x, dec_x in CASES:
+    fake = [
+        ('t%d.png' % img_w, 0, 100, name_x, '大消费'),
+        ('t%d.png' % img_w, 0, 100, dec_x, '*11'),
+        ('t%d.png' % img_w, 0, 500, 60, '600000'),
+        ('t%d.png' % img_w, 0, 500, 320, '09:31'),
+        ('t%d.png' % img_w, 0, 500, 380, '首板'),
+        ('t%d.png' % img_w, 0, 500, 420, '乳业'),
+    ]
+    prof = P.column_profile(fake)
+    got_new = [t['name'] for t in P.classify(fake, img_w, prof)[0]]
+    got_old = [t['name'] for t in P.classify(fake, 1921, prof)[0]]
+    print('  宽 %-5d 按图宽→%-8s 按写死1921→%s'
+          % (img_w, (got_new or ['无'])[0], (got_old or ['无'])[0]))
+    if not got_new:
+        print('  [FAIL] 宽 %d 的图上「名+图注」被切开后仍救不回来' % img_w)
+        ok = False
+# 窄图 + 切碎：这正是 8/12 的失败场景，老代码必须复现失败（否则用例没意义）
+narrow2 = [('n2.png', 0, 100, 480, '大消费'),
+           ('n2.png', 0, 100, 690, '*11'),
+           ('n2.png', 0, 500, 60, '600000'),
+           ('n2.png', 0, 500, 320, '09:31'),
+           ('n2.png', 0, 500, 380, '首板'),
+           ('n2.png', 0, 500, 420, '乳业')]
+if P.classify(narrow2, 1921, P.column_profile(narrow2))[0]:
+    print('  [FAIL] 老逻辑（1921）在窄图上竟然能救回 —— 用例没复现出原 bug')
+    ok = False
 
 print('\n自测结论:', '全部通过' if ok else '存在失败项')
 sys.exit(0 if ok else 1)
