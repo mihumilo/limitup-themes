@@ -1,11 +1,14 @@
 name: 每日官方复盘转录
 
+# 每个交易日跑两次：
+#   北京 16:30（官方复盘帖一般 15:30~16:30 发布）—— 第一次
+#   北京 20:00 —— 第二次补跑：若首次未拿到图 / OCR 未通过校验，这次再试
+# 触发改成「每天」而不是 1-5：由交易日历决定当天是否要跑，
+# 这样调休上班的周六/周日（真实交易日）也不会被漏掉。
 on:
   schedule:
-    # 北京时间 16:30（官方复盘帖一般 15:30~16:30 发布）—— 第一次
-    - cron: '30 8 * * 1-5'
-    # 北京时间 20:00 —— 第二次补跑：若首次未拿到图 / OCR 未通过校验，这次再试
-    - cron: '0 12 * * 1-5'
+    - cron: '30 8 * * *'
+    - cron: '0 12 * * *'
   workflow_dispatch:
     inputs:
       date:
@@ -22,6 +25,7 @@ on:
 
 permissions:
   contents: write
+  issues: write        # 连续两次失败时自动开 Issue
 
 jobs:
   transcribe:
@@ -46,31 +50,109 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # -u：关闭输出缓冲，实时看到每一步日志（不然要等进程结束才一次性刷出来）
-      # REVIEW_API_BASE：可选，填 Worker 的 /api/review 地址，用于绕开 GitHub 出口限制
-      - name: 跑转录
-        env:
-          REVIEW_API_BASE: ${{ vars.REVIEW_API_BASE }}
+      # 目标日期 + 本次是当天第几次尝试（8 点档=1，12 点档=2；手动触发算最后一次机会）
+      - name: 确定目标日期与尝试次序
+        id: meta
         run: |
           DATE="${{ github.event.inputs.date }}"
           if [ -z "$DATE" ]; then DATE=$(TZ=Asia/Shanghai date +%Y%m%d); fi
+          ATTEMPT=1
+          [ "$(date -u +%H)" -ge 11 ] && ATTEMPT=2
+          [ "${{ github.event_name }}" = "workflow_dispatch" ] && ATTEMPT=2
+          echo "date=$DATE" >> $GITHUB_OUTPUT
+          echo "attempt=$ATTEMPT" >> $GITHUB_OUTPUT
+
+      # 交易日历：缺文件或不是今天更新的才拉（一天最多 1 次上游请求）。
+      # 取不到也不阻塞 —— 后面还有「两次都拉不到就算非交易日」的兜底规则。
+      - name: 更新交易日历
+        continue-on-error: true
+        run: python -u scripts/trading_calendar.py --ensure
+
+      - name: 当日是否交易日
+        id: gate
+        run: python -u scripts/trading_calendar.py --check ${{ steps.meta.outputs.date }} >> $GITHUB_OUTPUT
+
+      # 自动补齐缺失的交易日（保留最近 30 个）。
+      # 失败不影响当天转录；一次最多补 6 天，剩下的留给后续运行继续补。
+      - name: 补跑缺失交易日
+        continue-on-error: true
+        run: python -u scripts/backfill_gaps.py --keep 30 --max 6
+
+      # -u：关闭输出缓冲，实时看到每一步日志
+      # 第 1 次失败不判作业失败（留给 20:00 补跑）；第 2 次失败才判失败 → 触发告警
+      - name: 跑转录
+        id: run
+        if: steps.gate.outputs.is_trading != 'false'
+        continue-on-error: ${{ steps.meta.outputs.attempt == '1' }}
+        env:
+          REVIEW_API_BASE: ${{ vars.REVIEW_API_BASE }}
+        run: |
           FORCE=""
           if [ "${{ github.event.inputs.force }}" = "true" ]; then FORCE="--force"; fi
           LOCATE=""
           if [ "${{ github.event.inputs.locate_only }}" = "true" ]; then LOCATE="--locate-only"; fi
-          echo "目标日期: $DATE  图源API: ${REVIEW_API_BASE:-未配置(直接爬同花顺)}"
-          python -u scripts/pipeline.py --date "$DATE" $FORCE $LOCATE || true
+          echo "目标日期: ${{ steps.meta.outputs.date }}  第 ${{ steps.meta.outputs.attempt }} 次  图源API: ${REVIEW_API_BASE:-未配置(直接爬同花顺)}"
+          python -u scripts/pipeline.py --date "${{ steps.meta.outputs.date }}" $FORCE $LOCATE
 
-      # 自动体检：关键词是否混入连板/成交额、连板数是否全为 1、时间缺失、家数偏差
+      # 自动体检：关键词是否混入连板/成交额、连板数是否全为 1、时间缺失、家数偏差。
+      # 体检只是诊断，不决定作业成败（成败由上面「跑转录」决定）。
       - name: 产出体检
-        if: always()
-        run: |
-          DATE="${{ github.event.inputs.date }}"
-          if [ -z "$DATE" ]; then DATE=$(TZ=Asia/Shanghai date +%Y%m%d); fi
-          python -u scripts/check_output.py "$DATE" || true
+        if: always() && steps.gate.outputs.is_trading != 'false'
+        continue-on-error: true
+        run: python -u scripts/check_output.py "${{ steps.meta.outputs.date }}"
 
-      # 排障用：把 OCR 原始数据（每个文字块的文本+坐标）上传为 artifact。
-      # 解析结果不理想时，从 Actions 页面下载它，就能在本地离线复现与调参。
+      # 两次都没拿到 → 按约定判定为非交易日，不需要数据，不发告警
+      - name: 两次均未取到 → 记为非交易日
+        if: always() && steps.meta.outputs.attempt == '2' && steps.run.outcome == 'failure'
+        run: python -u scripts/mark_nontrading.py --date "${{ steps.meta.outputs.date }}"
+
+      - name: 提交结果
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add themes review trading-calendar.json nontrading-days.json
+          if git diff --cached --quiet; then
+            echo "无新增数据"
+          else
+            git commit -m "chore: 更新官方复盘主题分类 $(TZ=Asia/Shanghai date +%Y-%m-%d)"
+            for i in 1 2 3; do
+              git pull --rebase origin main && git push && break
+              echo "第 $i 次推送失败，重试…"; sleep $((i*5))
+            done
+          fi
+
+      # 告警：只在「交易日历确认当天是交易日」且「第 2 次尝试也失败」时才开 Issue。
+      # 非交易日两次都拉不到属于正常（见上一步），不告警。
+      - name: 连续两次失败 → 开 Issue
+        if: failure() && steps.meta.outputs.attempt == '2' && steps.gate.outputs.is_trading == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DATE: ${{ steps.meta.outputs.date }}
+        run: |
+          TITLE="转录失败：$DATE（两次尝试均未通过校验）"
+          # 去重：已有同名未关闭 Issue 就不重复开
+          if gh issue list --state open --search "$TITLE in:title" --json title --jq '.[].title' | grep -qF "$TITLE"; then
+            echo "已有同名 Issue，跳过"
+            exit 0
+          fi
+          cat > _issue.md <<'BODY'
+          ## 转录失败
+
+          - 日期：$DATE
+          - 现象：北京 16:30 与 20:00 两次尝试都未产出 `verified=true`
+          - 运行记录：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          交易日历确认当天**是交易日**，所以这不属于正常的「非交易日无数据」。
+
+          ### 自查
+
+          1. Actions 里用 `workflow_dispatch` 跑一次 `locate_only=true`，看是否有 401 告警
+          2. 若 GitHub 出口被封，给仓库配变量 `REVIEW_API_BASE` 指向 Worker 的 `/api/review`
+          3. 下载本次运行的 `ocr-raw-*` artifact，离线复现解析问题
+          BODY
+          gh issue create --title "$TITLE" --label "auto-alert" --body-file _issue.md
+
+      # 排障用：OCR 原始数据（每个文字块的文本+坐标）
       - name: 上传 OCR 原始数据（排障用）
         if: always()
         uses: actions/upload-artifact@v4
@@ -80,20 +162,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: 提交结果
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add themes review
-          if git diff --cached --quiet; then
-            echo "无新增数据"
-          else
-            git commit -m "chore: 更新官方复盘主题分类 $(TZ=Asia/Shanghai date +%Y-%m-%d)"
-            git push
-          fi
-
       # 国内备用链路：同步一份到 Gitee 镜像仓库（需在 Secrets 配 GITEE_USER / GITEE_TOKEN）
-      # 未配置则自动跳过，不影响主流程
       - name: 同步到 Gitee 镜像（国内备用）
         if: env.GITEE_TOKEN != '' && env.GITEE_USER != ''
         run: |
