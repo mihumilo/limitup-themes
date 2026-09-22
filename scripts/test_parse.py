@@ -290,7 +290,8 @@ else:
                  else '%d天%d板' % (st['streak'] + 1, st['streak']))
             if st['streak'] > 1:
                 sadd(622, '连板', y + 12)          # 连板列被切碎的残片
-            for pi, part in enumerate([p for p in (st['keyword'] or '').split('+') if p]):
+            parts = [p for p in (st['keyword'] or '').split('+') if p]
+            for pi, part in enumerate(parts):
                 sadd(800, part, y + pi * 40)        # 关键词列多行，需拼回
             # 原因列干扰：中央区域里的杂质短词，绝不能变成标题
             sadd(1100, '业绩增长')
@@ -299,9 +300,12 @@ else:
             # 模拟重叠切片：同一行被识别两次（整行每个词块都重复一遍，y 抖动 5px）
             if st['code'].endswith('6'):
                 sadd(45, st['code'], y + 5)
-                for pi, part in enumerate([p for p in (st['keyword'] or '').split('+') if p]):
+                for pi, part in enumerate(parts):
                     sadd(800, part, y + pi * 40 + 5)
-            y += 200
+            # ★ 行高必须自适应：真实图上"涨停原因内容"文字多的行更高。
+            #   固定 420px 行距时，keyword ≥6 段的行会越过与下一行的中线，
+            #   最后一段被 parse 归给下一行（真实图上不会——行高跟着内容走）。
+            y += 200 + max(0, len(parts) * 40 - 160)
 
     sim_pool = {}
     for th in gt['themes']:

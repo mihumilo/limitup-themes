@@ -1060,7 +1060,14 @@ def run_one(date, force=False, from_ocr=False, locate_only=False, ocr_only=False
     all_codes = [c for t in themes for c in t['codes']]
     bad = [c for c in all_codes if pool_codes and c not in pool_codes]
     bse = len(bad)
-    verified = bool(pool_codes) and total == len(pool_codes) + bse and bse <= 2
+    # ★ 池外股的预期构成是**北交所**（fuyao 涨停池不含北交所，官方图上有 → 全部落到池外）。
+    #   30 天实测：21 只池外股全部 920 开头，无一例外。
+    #   旧规则 `bse <= 2` 在北交所活跃日（池外 3+ 只）会误判 verified=false
+    #   （20260901/20260902 就是这么误伤的，bse=3 全是 920 开头）。
+    #   真正要防的是「OCR 把不存在的沪深代码识别进图」——那才是转录错误：
+    #   池外股里只要出现非北交所前缀（60/68/00/30 之外又不是北交所前缀）就不通过。
+    bse_non_bj = [c for c in bad if not c.startswith(('92', '83', '87', '43'))]
+    verified = bool(pool_codes) and total == len(pool_codes) + bse and not bse_non_bj
     # 名称回填：官方图未识别出名称时，用涨停池名称补齐
     for t in themes:
         for s in t['stocks']:
@@ -1073,8 +1080,9 @@ def run_one(date, force=False, from_ocr=False, locate_only=False, ocr_only=False
                'themes': themes},
               open(theme_fp, 'w', encoding='utf-8'), ensure_ascii=False)
 
-    print('  主题 %d 个 / 个股 %d 只 / 涨停池 %d 只 / 池外 %d'
-          % (len(themes), total, len(pool_codes), bse))
+    print('  主题 %d 个 / 个股 %d 只 / 涨停池 %d 只 / 池外 %d（北交所 %d / 非北交所 %d）'
+          % (len(themes), total, len(pool_codes), bse,
+             bse - len(bse_non_bj), len(bse_non_bj)))
     for t in themes:
         print('    %-22s %2d 只 (图注 %d)' % (t['name'], t['count'], t['declare']))
     if bad:
