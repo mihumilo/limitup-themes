@@ -111,25 +111,38 @@ def parse_streak(sv):
 
 
 def pool_streak_of(high_days, high_days_value):
-    """把同花顺池的「N天M板」换算成**连板数**（连续口径，与官方图「连板天数」一致）。
+    """同花顺 high_days（"4天3板"）→ **板数**，一律取 M。
 
-    同花顺池没有直接的「连板数」字段，只有 N 天窗口内的涨停次数 M，二者含义不同。
-    实测 20260918（官方图为准）：
-        内蒙新华 3天3板 → 3 板      （N==M，说明这 M 次是连续的）
-        华瓷股份 4天4板 → 4 板      （N==M）
-        和顺石油 4天2板 → 首板      （N≠M，窗口内有断层 → 今天这一板是新起的第一板）
-        远望谷   6天3板 → 首板      （N≠M，且池 change_tag=FIRST_LIMIT）
-    所以规则是：N==M 时取 M，否则取 1。"""
+    需求（2026-09-22 起）：涨板高度**以同花顺接口为准**。同花顺的语义是
+    「N 天窗口内涨停 M 次」，M 就是它给的板数，看板直接按 M 分档；
+    N > M（中间断过板，如「4天3板」）不再降级成首板，而是在卡片上标注
+    「4天3板」让读者自己判断 —— 所以这里**恒取 M**。
+
+    历史口径（已废弃）：曾按「N==M 取 M，否则取 1」换算成「连续板」，
+    那是把同花顺的 M 当成 OCR 竖排粘连的产物，与看板分档口径不一致。
+    """
     s = str(high_days or '').replace(' ', '')
     m = re.match(r'^(\d{1,2})天(\d{1,2})板$', s)
     if m:
-        n, k = int(m.group(1)), int(m.group(2))
+        k = int(m.group(2))
         if 1 <= k <= MAX_STREAK:
-            return k if n == k else 1
+            return k
     if s.startswith('首板'):
         return 1
     v = (int(high_days_value or 0) >> 16) or 1
     return v if 1 <= v <= MAX_STREAK else 1
+
+
+def hd_note_of(high_days):
+    """「N天M板」里 N>M（中间断板）时返回原文备注，否则空串。
+
+    看板用它在个股卡片上标出「4天3板」—— 归属仍是 M 板档，只是提示读者
+    这不是一条纯 M 连板。N==M 时不标（与「M连板」同义）。"""
+    s = str(high_days or '').replace(' ', '')
+    m = re.match(r'^(\d{1,2})天(\d{1,2})板$', s)
+    if m and int(m.group(1)) > int(m.group(2)):
+        return s
+    return ''
 TITLE_RE = re.compile(r'^(.{2,20}?)[\s]*[\*＊✱x×X·•・]?[\s]*(\d{1,3})$')
 TITLE_NAME_RE = re.compile(r'^[\u4e00-\u9fa5A-Za-z0-9/]+$')   # 标题名形态：中文/字母/数字/斜杠
 LONG_RE = re.compile(r'_(\d+)_(\d+)\.(?:png|jpe?g|webp)$', re.I)
@@ -415,11 +428,16 @@ def _file_key(fn):
 
 
 def dedupe_items(items):
-    """重叠切片会让同一段文字被识别两次。按文本分桶，y/x 接近的视为同一次识别。
-    阈值放宽到 80/40：切片边缘的 OCR 框常有十几像素抖动，之前 25px 阈值漏掉了部分重复。"""
+    """重叠切片会让同一段文字被识别两次。按 (图片, 文本) 分桶，y/x 接近的视为同一次识别。
+    阈值放宽到 80/40：切片边缘的 OCR 框常有十几像素抖动，之前 25px 阈值漏掉了部分重复。
+
+    ★ 分桶必须带**图片名**（2026-09-22 修）：官方长图被拆成多张，每张的 y 都从 0 开始。
+      只用文本分桶时，A 图 y=2130 的「09:25:00」与 B 图 y=2130 的同名文本
+      （dy=0、dx=0）会被判成重复而**丢掉一张图的数据** —— 表现为该股时间/字段整列变空。
+    """
     buckets = {}
-    for it in sorted(items, key=lambda r: (r[4], r[2], r[3])):
-        lst = buckets.setdefault(it[4], [])
+    for it in sorted(items, key=lambda r: (r[0], r[4], r[2], r[3])):
+        lst = buckets.setdefault((it[0], it[4]), [])
         dup = False
         for k in lst:
             if abs(k[2] - it[2]) < 80 and abs(k[3] - it[3]) < 40:
@@ -441,8 +459,11 @@ def merge_vertical_streak(items):
     OCR 会把它切成两个单字块 → 拼不出「首板」/「2板」→ 连板数解析失败 →
     回落到涨停池的 high_days（口径与图不同，会把首板错标成 2 板）。
     这里把同一列上下紧邻、且拼接后正好构成连板格式的两个短块合并。
+
+    ★ 排序键必须带**图片名**（2026-09-22 修）：多张图的 y 都从 0 开始，
+      只按 (x, y) 排序会让不同图的块交错误判为「上下紧邻」而错误合并。
     """
-    order = sorted(range(len(items)), key=lambda i: (items[i][3], items[i][2]))
+    order = sorted(range(len(items)), key=lambda i: (items[i][0], items[i][3], items[i][2]))
     out = list(items)
     drop, taken = set(), set()
     for a in range(len(order)):
@@ -455,6 +476,8 @@ def merge_vertical_streak(items):
         for b in range(a + 1, min(a + 6, len(order))):
             ib = order[b]
             if ib in drop or ib in taken:
+                continue
+            if out[ia][0] != out[ib][0]:                 # 必须同一张图
                 continue
             if abs(out[ia][3] - out[ib][3]) > 70:        # 必须同一列
                 continue
@@ -882,9 +905,9 @@ def parse_rows(items, pool=None, width=None):
             # 且不会像 OCR 那样把「涨停原因内容」的残片混进关键词。
             ps = pool_get(pool, r['code']) or {}
             name = ps.get('name') or (nm['v'] if nm else '')
-            # 连板数：**看板最终以 Worker 侧同花顺涨停池的「连续涨停天数」为准**
-            # （worker 里 pickStreak() 用池值覆盖这里），所以这份 JSON 里的 streak
-            # 只是兜底。这里尽量写对，并过滤 OCR 竖排粘连产生的异常值（'33' / '22'）。
+            # 连板数：**一律以同花顺池的 M 为准**（需求 1，2026-09-22 起）。
+            # 池里有这只票 → 直接用池值，图上 OCR 值只用于**体检**（不一致就打印出来）；
+            # 池里没有（北交所等） → 才回落图上 OCR 值，并过滤竖排粘连产生的异常值（'33'/'22'）。
             ocr_streak = (parse_streak(st['v']) or 0) if st else 0
             pool_streak = ps.get('streak') or 0
             if ocr_streak and pool_streak and ocr_streak != pool_streak:
@@ -892,7 +915,9 @@ def parse_rows(items, pool=None, width=None):
                                         % (r['code'], name, ocr_streak, pool_streak))
             if st and not ocr_streak:
                 streak_bad.append('%s %s 图上连板列=%r' % (r['code'], name, st['v']))
-            streak = ocr_streak or pool_streak or 1
+            streak = pool_streak or ocr_streak or 1
+            hd_v = ps.get('hd') or ''
+            gap_v = ps.get('gap') or ''
             time_v = ps.get('time') or (tm['v'] if tm else '')
             kw_v = ps.get('reason') or (kw['v'] if kw else '')
             if ps:
@@ -907,6 +932,8 @@ def parse_rows(items, pool=None, width=None):
                 'code': r['code'], 'name': name,
                 'time': time_v,
                 'streak': streak,
+                'hd': hd_v,
+                'gap': gap_v,
                 'keyword': kw_v,
             })
 
@@ -990,6 +1017,8 @@ def fetch_pool(date):
                     'reason': s.get('reason_type', '') or '',
                     'time': ts_to_bj(s.get('last_limit_up_time') or s.get('first_limit_up_time')),
                     'streak': st or 1,
+                    'hd': hd,                      # high_days 原文（"4天3板"）
+                    'gap': hd_note_of(hd),         # N>M 时的卡片备注
                 }
             if len(info) < 200:
                 break

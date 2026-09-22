@@ -168,12 +168,17 @@ for label, passed in [
      P.parse_streak('33') is None and P.parse_streak('22') is None
      and P.parse_streak('3') == 3 and P.parse_streak('首板') == 1
      and P.parse_streak('4天4板') == 4 and P.parse_streak('6天3板') == 3),
-    # 同花顺池「N天M板」→ 连板数（连续口径）：N==M 取 M，否则是新一轮首板=1
-    # 已用 20260918 官方图逐一核对：和顺石油 4天2板→1、远望谷 6天3板→1（都是首板）
-    ('池「N天M板」换算成连板数（与官方图一致）',
+    # 同花顺池「N天M板」→ 板数：**恒取 M**（需求 1，2026-09-22 起）。
+    # N>M（中间断过板）不再降级成首板 —— 板数照取 M，另用 gap 备注标出原文。
+    ('池「N天M板」→ 板数恒取 M（同花顺口径）',
      P.pool_streak_of('3天3板', 196611) == 3 and P.pool_streak_of('4天4板', 262148) == 4
-     and P.pool_streak_of('4天2板', 131076) == 1 and P.pool_streak_of('6天3板', 196614) == 1
+     and P.pool_streak_of('4天2板', 131076) == 2 and P.pool_streak_of('6天3板', 196614) == 3
      and P.pool_streak_of('2天2板', 131074) == 2 and P.pool_streak_of('首板', None) == 1),
+    # 只有 N>M 才需要卡片备注（N==M 与「M连板」同义，不标）
+    ('「N天M板」备注只在 N>M 时给出',
+     P.hd_note_of('4天2板') == '4天2板' and P.hd_note_of('6天3板') == '6天3板'
+     and P.hd_note_of('4天4板') == '' and P.hd_note_of('3天3板') == ''
+     and P.hd_note_of('首板') == '' and P.hd_note_of('') == ''),
 ]:
     print('  %s %s' % ('[OK]' if passed else '[FAIL]', label))
     ok = ok and passed
@@ -195,9 +200,10 @@ print('  001216 →', s2[0] if s2 else '(缺)')
 print('  %s 时间/关键词取池（无 OCR 残片）' % ('[OK]' if use_ok else '[FAIL]'))
 ok = ok and use_ok
 
-# JSON 内连板以图为准：图上写「首板」，池写 4 板 → 这条 JSON 里必须是 1
-streak_img_ok = bool(s2) and s2[0]['streak'] == 1
-print('  %s JSON 内连板以图为准（图首板 vs 池4板 → 1）'
+# 连板：**一律以同花顺池为准**（需求 1，2026-09-22 起）。
+# 图上写「首板」、池写 4 板 → 取池的 4（旧口径是「以图为准」，已废弃）。
+streak_img_ok = bool(s2) and s2[0]['streak'] == 4
+print('  %s JSON 内连板以池为准（图首板 vs 池4板 → 4）'
       % ('[OK]' if streak_img_ok else '[FAIL]'))
 ok = ok and streak_img_ok
 
@@ -266,6 +272,17 @@ else:
     def sadd(x, t, yy=None):
         sim3.append(('%s_%d.png' % (gt['date'], fi), 0, y if yy is None else yy, x, t))
 
+    def streak_to_hd(streak, code):
+        """板数 → 官方图「连板天数」列的原文（N天M板）。
+
+        真实图上 N 与 M 的关系不是固定的：多数个股 N==M（如 3天3板），
+        但中间断过板的会出现 N>M（如 4天3板、5天3板）。
+        这里按代码稳定地混入 N>M 的情形（约每 3 只来 1 只），
+        好让「板数恒取 M」这条规则在规模化回归里真的被覆盖到。
+        """
+        n = streak + 1 if (int(code[-2:]) % 3 == 0 and streak >= 2) else streak
+        return n, streak
+
     def nxt_file():
         """换到下一张图（y 归零）——整行判断，绝不让一行被切在两图之间（真实图就是这样）"""
         global fi, y
@@ -285,9 +302,14 @@ else:
             sadd(45, st['code'])
             sadd(363, '4.96亿')
             sadd(513, st['time'] or '09:30:00')
-            # 连板列真实格式：首板 / N天M板（连板数取 M）
-            sadd(622, '首板' if st['streak'] == 1
-                 else '%d天%d板' % (st['streak'] + 1, st['streak']))
+            # 连板列真实格式：首板 / N天M板（**板数取 M**，需求 1 自 2026-09-22 起）。
+            # N>M 表示中间断过板（如 4天3板、4天2板），板数仍取 M —— 仿真必须
+            # 造出这种 N>M 的值，否则「恒取 M」这条规则在规模化回归里根本测不到。
+            if st['streak'] == 1:
+                sadd(622, '首板')
+            else:
+                n_days, m_boards = streak_to_hd(st['streak'], st['code'])
+                sadd(622, '%d天%d板' % (n_days, m_boards))
             if st['streak'] > 1:
                 sadd(622, '连板', y + 12)          # 连板列被切碎的残片
             parts = [p for p in (st['keyword'] or '').split('+') if p]
