@@ -168,9 +168,10 @@ for label, passed in [
      P.parse_streak('33') is None and P.parse_streak('22') is None
      and P.parse_streak('3') == 3 and P.parse_streak('首板') == 1
      and P.parse_streak('4天4板') == 4 and P.parse_streak('6天3板') == 3),
-    # 同花顺池「N天M板」→ 板数：**恒取 M**（需求 1，2026-09-22 起）。
-    # N>M（中间断过板）不再降级成首板 —— 板数照取 M，另用 gap 备注标出原文。
-    ('池「N天M板」→ 板数恒取 M（同花顺口径）',
+    # 同花顺池「N天M板」→ 从文本提取 M（**仅作「N天M板」备注/体检用**）。
+    # 真实连续高度已改用连板天梯 continue_num 校准（见 fetch_continuous）；
+    # 这里的 M 只用于 gap 备注，不再决定看板档位。
+    ('池「N天M板」→ 文本提取 M（备注/体检口径）',
      P.pool_streak_of('3天3板', 196611) == 3 and P.pool_streak_of('4天4板', 262148) == 4
      and P.pool_streak_of('4天2板', 131076) == 2 and P.pool_streak_of('6天3板', 196614) == 3
      and P.pool_streak_of('2天2板', 131074) == 2 and P.pool_streak_of('首板', None) == 1),
@@ -186,7 +187,7 @@ for label, passed in [
 # ---------------------------------------------------------------- 字段来源策略
 # 名称/时间/关键词 以涨停池为准（与官方图同源、无 OCR 残片）。
 # 连板数：pipeline 产出的这条 JSON 里「以图为准、池兜底」（图的连板列读得出就用图值）；
-# 但**看板最终显示的连板数由 Worker 用同花顺涨停池的连续涨停天数覆盖**
+# 但**看板最终显示的连板数由 Worker 用同花顺连板天梯的 continue_num 覆盖**
 # （worker 的 pickStreak()），因为官方图那列是竖排 OCR，容易拼错（'3'+'3'→33）。
 pool2 = {'001216': {'name': '华瓷股份', 'reason': '氧化锆粉体+MLCC验证+越南基地',
                     'time': '09:56:39', 'streak': 4}}
@@ -200,8 +201,8 @@ print('  001216 →', s2[0] if s2 else '(缺)')
 print('  %s 时间/关键词取池（无 OCR 残片）' % ('[OK]' if use_ok else '[FAIL]'))
 ok = ok and use_ok
 
-# 连板：**一律以同花顺池为准**（需求 1，2026-09-22 起）。
-# 图上写「首板」、池写 4 板 → 取池的 4（旧口径是「以图为准」，已废弃）。
+# 连板：**一律以同花顺连板天梯为准**（真实连续高度，需求 1）。
+# 图上写「首板」、池（天梯校准后）写 4 板 → 取池的 4（旧口径是「以图为准」，已废弃）。
 streak_img_ok = bool(s2) and s2[0]['streak'] == 4
 print('  %s JSON 内连板以池为准（图首板 vs 池4板 → 4）'
       % ('[OK]' if streak_img_ok else '[FAIL]'))

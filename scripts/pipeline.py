@@ -45,6 +45,11 @@ POOL_API = 'https://data.10jqka.com.cn/dataapi/limit_up/limit_up_pool'
 POOL_REFERER = 'https://data.10jqka.com.cn/datacenterph/limitup/limtupInfo.html'
 POOL_FIELDS = ('199112,10,9001,330323,330324,330325,9002,330329,'
                '133971,133970,1968584,3475914,9003,9004')
+# 连板天梯接口：返回**真实连续涨停高度**（height/continue_num）。
+# 涨停池的 high_days 是「N天M板」（N 天窗口内 M 次涨停），M 可能因中间断板
+# 而大于真实连续高度（例：美盈森「5天3板」实际 2 连板、百花医药「4天3板」实际 2 连板），
+# 所以连续高度必须用连板天梯的 continue_num 校准，high_days 只作「N天M板」备注。
+CONTINUOUS_API = 'https://data.10jqka.com.cn/dataapi/limit_up/continuous_limit_up'
 
 SEG, OVERLAP = 900, 150          # 切片高度 / 重叠，保证跨切片的行不被切断
 ROW_TOL = 38                     # 同一表格行的 y 容差
@@ -111,15 +116,11 @@ def parse_streak(sv):
 
 
 def pool_streak_of(high_days, high_days_value):
-    """同花顺 high_days（"4天3板"）→ **板数**，一律取 M。
+    """同花顺 high_days（"4天3板"）→ 从文本取 M（**仅作备注/体检用**）。
 
-    需求（2026-09-22 起）：涨板高度**以同花顺接口为准**。同花顺的语义是
-    「N 天窗口内涨停 M 次」，M 就是它给的板数，看板直接按 M 分档；
-    N > M（中间断过板，如「4天3板」）不再降级成首板，而是在卡片上标注
-    「4天3板」让读者自己判断 —— 所以这里**恒取 M**。
-
-    历史口径（已废弃）：曾按「N==M 取 M，否则取 1」换算成「连续板」，
-    那是把同花顺的 M 当成 OCR 竖排粘连的产物，与看板分档口径不一致。
+    ⚠️ 注意：M 是「N 天窗口内涨停次数」，**不是连续高度**（中间断板时 M > 真实连续高度）。
+    看板真实连续高度已改用连板天梯 continue_num（见 fetch_continuous），
+    本函数返回值只用于「N天M板」备注与 OCR 差异体检，不再决定档位。
     """
     s = str(high_days or '').replace(' ', '')
     m = re.match(r'^(\d{1,2})天(\d{1,2})板$', s)
@@ -131,6 +132,29 @@ def pool_streak_of(high_days, high_days_value):
         return 1
     v = (int(high_days_value or 0) >> 16) or 1
     return v if 1 <= v <= MAX_STREAK else 1
+
+
+def fetch_continuous(date):
+    """连板天梯 → {code: continue_num}（真实连续高度）。
+
+    天梯只覆盖「连续 2 板及以上」的票；涨停了但不在天梯里 = 前一天没涨停 = 首板（1）。
+    失败时返回空 dict —— 调用方回落到「天梯缺失 = 首板 1」的保守口径。"""
+    out = {}
+    try:
+        r = get(CONTINUOUS_API, referer=POOL_REFERER, params={
+            'page': 1, 'limit': 200, 'date': date, '_': 1})
+        j = r.json()
+        if not j or j.get('status_code') != 0:
+            return out
+        for group in j.get('data') or []:
+            h = int(group.get('height') or 0)
+            for s in group.get('code_list') or []:
+                code = str(s.get('code', '')).zfill(6)
+                if code and h:
+                    out[code] = h
+    except Exception:
+        pass
+    return out
 
 
 def hd_note_of(high_days):
@@ -905,8 +929,8 @@ def parse_rows(items, pool=None, width=None):
             # 且不会像 OCR 那样把「涨停原因内容」的残片混进关键词。
             ps = pool_get(pool, r['code']) or {}
             name = ps.get('name') or (nm['v'] if nm else '')
-            # 连板数：**一律以同花顺池的 M 为准**（需求 1，2026-09-22 起）。
-            # 池里有这只票 → 直接用池值，图上 OCR 值只用于**体检**（不一致就打印出来）；
+            # 连板数：**一律以同花顺连板天梯的 continue_num 为准**（真实连续高度，需求 1）。
+            # 池里有这只票 → 直接用池值（已由连板天梯校准），图上 OCR 值只用于**体检**（不一致就打印）；
             # 池里没有（北交所等） → 才回落图上 OCR 值，并过滤竖排粘连产生的异常值（'33'/'22'）。
             ocr_streak = (parse_streak(st['v']) or 0) if st else 0
             pool_streak = ps.get('streak') or 0
@@ -996,7 +1020,12 @@ def fetch_pool(date):
     last_limit_up_time == 「最终涨停时间」列、high_days == 「连板天数」列，
     三者与官方图完全同源。所以明细字段以池为准，OCR 仅作兜底 ——
     OCR 读「涨停原因内容」那一大段时会产生「托。」「560.06%。」这类残片。
+
+    ⚠️ 连板高度例外：high_days 的「N天M板」是窗口内涨停次数，**不是连续高度**，
+    故 streak 改用**连板天梯 continue_num**（fetch_continuous）校准；
+    天梯里没有（已断板）→ 首板 1。high_days 原文与「N>M」备注仍保留在 hd/gap。
     """
+    cont = fetch_continuous(date)
     out = {}
     for page in range(1, 5):
         try:
@@ -1011,12 +1040,13 @@ def fetch_pool(date):
             for s in info:
                 code = str(s.get('code', '')).zfill(6)
                 hd = s.get('high_days') or ''
-                st = pool_streak_of(hd, s.get('high_days_value'))
+                # 真实连续高度：连板天梯优先，天梯缺失 = 首板 1
+                st = cont.get(code) or 1
                 out[code] = {
                     'name': s.get('name', '') or '',
                     'reason': s.get('reason_type', '') or '',
                     'time': ts_to_bj(s.get('last_limit_up_time') or s.get('first_limit_up_time')),
-                    'streak': st or 1,
+                    'streak': st,
                     'hd': hd,                      # high_days 原文（"4天3板"）
                     'gap': hd_note_of(hd),         # N>M 时的卡片备注
                 }
