@@ -67,12 +67,13 @@ jobs:
           if [ -z "$DATE" ]; then DATE=$(TZ=Asia/Shanghai date +%Y%m%d); fi
           echo "date=$DATE" >> $GITHUB_OUTPUT
 
-      # 自动补齐缺失的日期（保留最近 30 个有数据的日子）。
+      # 自动补齐缺失的日期（保留最近 90 个有数据的日子，与 Worker 侧 KV 一致）。
       # 候选 = 工作日 ∩ 不在 nontrading-days.json 里 —— 不需要任何交易日历。
-      # 失败不影响当天转录；一次最多补 6 天，剩下的留给后续运行继续补。
+      # 失败不影响当天转录；一次最多补 6 天，剩下的留给后续运行继续补
+      # （从 30 扩到 90 时缺口约 60 天，按每天两次定时跑 ≈ 5 天补齐，属正常节奏）。
       - name: 补跑缺失日期
         continue-on-error: true
-        run: python -u scripts/backfill_gaps.py --keep 30 --max 6
+        run: python -u scripts/backfill_gaps.py --keep 90 --max 6
 
       # -u：关闭输出缓冲，实时看到每一步日志
       # 已 verified 的日期会被 pipeline 自动跳过（这就是"拿到就不跑第二次"）

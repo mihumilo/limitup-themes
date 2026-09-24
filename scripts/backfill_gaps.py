@@ -2,6 +2,10 @@
 # -*- coding: utf-8 -*-
 """检查 themes/ 里缺失的日期并补跑，使仓库始终保留最近 N 个有数据的日子。
 
+★ 保留窗口统一为 **90 个交易日**（2026-09-24 定，与 Worker 侧 KV 的 TTL/裁剪保持一致）。
+  为什么是 90：情绪周期复盘要看「近 3 个月」的空间板/晋级率走势，30 天太短（只够 1 个多月），
+  90 天能覆盖 3~5 个完整情绪周期。代价只是仓库 JSON 变多（约 90 个文件，纯文本，不成负担）。
+
 ★ 不依赖交易日历（已取消）。判定规则改为「拉两次都拿不到 = 非交易日」：
    · 候选日期 = 工作日（周一~周五）—— 这是唯一还需要"猜"的地方，且它只是候选
    · 补跑拿不到的日期，本脚本会**自动记入 nontrading-days.json**（只试一次，不反复补）
@@ -14,8 +18,8 @@
    所以：**距今不足 grace-days 天的日期，失败只累计次数，绝不判定为跳过。**
 
 用法：
-    python scripts/backfill_gaps.py                 # 默认保留 30，一次最多补 6 天
-    python scripts/backfill_gaps.py --keep 30 --max 6
+    python scripts/backfill_gaps.py                 # 默认保留 90，一次最多补 6 天
+    python scripts/backfill_gaps.py --keep 90 --max 6
     python scripts/backfill_gaps.py --dry           # 只列出缺口，不真的跑
     python scripts/backfill_gaps.py --reset-tries   # 清空失败计数与已判定名单
 
@@ -153,7 +157,7 @@ def _pipeline():
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--keep', type=int, default=30)
+    ap.add_argument('--keep', type=int, default=90)
     ap.add_argument('--max', type=int, default=6)
     ap.add_argument('--end')
     ap.add_argument('--dry', action='store_true')

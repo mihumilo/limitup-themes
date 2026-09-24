@@ -9,9 +9,9 @@ on:
   workflow_dispatch:
     inputs:
       keep:
-        description: '保留最近多少个交易日的 JSON（默认 30）'
+        description: '保留最近多少个交易日的 JSON（默认 90）'
         required: false
-        default: '30'
+        default: '90'
 
 permissions:
   contents: write
@@ -29,7 +29,7 @@ jobs:
       - name: 保留最近 N 个交易日
         run: |
           KEEP="${{ github.event.inputs.keep }}"
-          if [ -z "$KEEP" ]; then KEEP=30; fi
+          if [ -z "$KEEP" ]; then KEEP=90; fi
           echo "保留最近 $KEEP 个交易日"
           for d in themes review; do
             [ -d "$d" ] || continue
@@ -53,7 +53,7 @@ jobs:
           if git diff --cached --quiet; then
             echo "无变化"
           else
-            git commit -m "chore: 清理历史 JSON（保留最近 30 个交易日）$(TZ=Asia/Shanghai date +%Y-%m-%d)"
+            git commit -m "chore: 清理历史 JSON（保留最近 $KEEP 个交易日）$(TZ=Asia/Shanghai date +%Y-%m-%d)"
             # 与 daily/backfill 一致：推送失败重试（并发运行时 origin 可能已经前移）
             for i in 1 2 3; do
               git pull --rebase origin main && git push && break
