@@ -309,6 +309,27 @@ def days_ago(d):
     return max(0, (b - a).days)
 
 
+def is_review_post(post):
+    """是否真正的「一图看懂涨停股」复盘长图帖（排除同天的功能宣传帖）。
+
+    ★ 2026-09-24 事故：同花顺同一天会发两类帖 ——
+      · 复盘长图帖：标题「一图看懂涨停股…」，图 `xxx_1921_7584_middle.png`（宽1921/高7584）
+      · 功能宣传帖：标题「“实时复盘”功能上线啦！」，图 `xxx_475_834_middle.png`（宽475/高834）
+      定位只判「发布日期 == 目标日」会命中宣传帖（它还发布得更晚、排在列表更前）→
+      下载到 475 宽的缩略图 → OCR 认不出标题和股票代码 → 0 主题 0 个股 → 任务 exit 2。
+
+    判据：图片 URL 里的宽（`_W_H.png` 的 W）≥ 1000 才算长图；宣传小图只有 400~500。
+    """
+    if not post or not post.get('imgs'):
+        return False
+    mx = 0
+    for u in post['imgs']:
+        g = LONG_RE.search(u)
+        if g:
+            mx = max(mx, int(g.group(1)))
+    return mx >= 1000
+
+
 def probe_page(n):
     pids = circle_page(n)
     if not pids:
@@ -326,19 +347,29 @@ def find_post(date):
     _probed = []
 
     def try_pids(pids, limit=None):
-        """逐个抓详情，命中即返回；记录是否『全部取不到』以便诊断"""
+        """逐个抓详情，命中**且是长图帖**才返回；记录是否『全部取不到』以便诊断。
+
+        ★ 只判日期会命中同天的功能宣传帖（图是 475 宽小图）——所以命中后还要过
+          is_review_post；当天只有宣传帖时先记进 fallback，继续往下找真复盘帖。
+        """
         ok = 0
+        fallback = None
         for k, pid in enumerate(pids if limit is None else pids[:limit]):
             post = fetch_post(pid)
             if post:
                 ok += 1
                 if post['date'] == date:
-                    return post
+                    if is_review_post(post):
+                        return post
+                    if fallback is None:
+                        fallback = post
+                        print('  [warn] pid %s 日期匹配但不是长图帖（标题「%s」）→ 继续找同天的复盘长图帖'
+                              % (pid, (post.get('title') or '')[:36]))
             if not post:
                 _probed.append(pid)
         if ok == 0 and pids:
             print('  [warn] %d 个 pid 详情页全部取不到（多为 401：Cookie 失效 / 出口 IP 被封）' % len(pids))
-        return None
+        return fallback
 
     recent = []
     for n in (1, 2, 3):
@@ -371,12 +402,16 @@ def find_post(date):
         for p in circle_page(n):
             if p not in pids:
                 pids.append(p)
+    fb = None
     for i in range(0, len(pids), 6):
         for pid in pids[i:i + 6]:
             post = fetch_post(pid)
             if post and post['date'] == date:
-                return post
-    return None
+                if is_review_post(post):
+                    return post
+                if fb is None:
+                    fb = post
+    return fb
 
 
 # ---------------------------------------------------------------- 下载 + OCR
