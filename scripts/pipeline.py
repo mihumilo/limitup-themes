@@ -1161,7 +1161,28 @@ def run_one(date, force=False, from_ocr=False, locate_only=False, ocr_only=False
     #   真正要防的是「OCR 把不存在的沪深代码识别进图」——那才是转录错误：
     #   池外股里只要出现非北交所前缀（60/68/00/30 之外又不是北交所前缀）就不通过。
     bse_non_bj = [c for c in bad if not c.startswith(('92', '83', '87', '43'))]
-    verified = bool(pool_codes) and total == len(pool_codes) + bse and not bse_non_bj
+    # ★★ 2026-09-25 修复：旧逻辑「只统计、不清理」——噪声照样写进 JSON 污染数据，
+    #     同时又因「池外出现非北交所代码」判 verified=False，把整天 100+ 只有效数据作废。
+    #     实测（2026-06~07 批量回填 25 个失败日）：26 个这类代码 **100% 不在当天涨停池** ——
+    #     000004/002808/600696 在多日反复出现（真实股票不可能天天涨停），
+    #     还有 060000/066009/696000/660000/606009/966009 这类前缀非法的错位识别。
+    #     结论：它们是 OCR 把成交额、序号等数字误当成代码列的**噪声**，不是真股票。
+    #     现在改为：**先把噪声真正剔除，再判定**（数据干净 + 不再误废）。
+    if bse_non_bj:
+        drop = set(bse_non_bj)
+        kept = []
+        for t in themes:
+            t['stocks'] = [s for s in t['stocks'] if s['code'] not in drop]
+            t['codes'] = [c for c in t['codes'] if c not in drop]
+            t['count'] = len(t['codes'])
+            if t['count'] > 0:
+                kept.append(t)
+        themes = kept
+        total = sum(t['count'] for t in themes)
+        bse = bse - len(bse_non_bj)          # 剩下的池外都是北交所（预期内）
+    # 容差：OCR 难免漏掉个别行，只要不是成片漏解析就认为可用（100 只以内允许差 1 只）
+    tol = max(1, len(pool_codes) // 100)
+    verified = bool(pool_codes) and abs(total - (len(pool_codes) + bse)) <= tol
     # 名称回填：官方图未识别出名称时，用涨停池名称补齐
     for t in themes:
         for s in t['stocks']:
@@ -1174,13 +1195,15 @@ def run_one(date, force=False, from_ocr=False, locate_only=False, ocr_only=False
                'themes': themes},
               open(theme_fp, 'w', encoding='utf-8'), ensure_ascii=False)
 
-    print('  主题 %d 个 / 个股 %d 只 / 涨停池 %d 只 / 池外 %d（北交所 %d / 非北交所 %d）'
-          % (len(themes), total, len(pool_codes), bse,
-             bse - len(bse_non_bj), len(bse_non_bj)))
+    print('  主题 %d 个 / 个股 %d 只 / 涨停池 %d 只 / 池外 %d（全为北交所）'
+          % (len(themes), total, len(pool_codes), bse))
+    if bse_non_bj:
+        print('    [已剔除 OCR 噪声代码 %d 个] %s'
+              % (len(bse_non_bj), ','.join(bse_non_bj[:10])))
     for t in themes:
         print('    %-22s %2d 只 (图注 %d)' % (t['name'], t['count'], t['declare']))
     if bad:
-        print('    池外代码(多为北交所): %s' % ','.join(bad[:10]))
+        print('    池外代码(北交所): %s' % ','.join([c for c in bad if c not in set(bse_non_bj)][:10]))
     print('  verified=%s  用时 %.0fs' % (verified, time.time() - t0))
     return verified
 

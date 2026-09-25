@@ -500,5 +500,23 @@ if '业绩增长' in _names7:
 else:
     print('  股票行上的杂质未被误认 ✓')
 
+# ---------------------------------------------------------------- 池外噪声清理（2026-09-25）
+# 背景：批量回填 25 个失败日里，「池外非北交所代码」经查 100% 不在当天涨停池
+# （000004/002808/600696 多日反复出现；060000/066009/696000 前缀非法）→ 全是 OCR 噪声。
+# 旧逻辑只统计不清理：既污染 JSON，又判 verified=False 作废整天数据。
+# 修复：真正剔除噪声代码 + 覆盖率判定留容差。这里用静态断言守住，防止被改回去。
+_src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'pipeline.py'),
+            encoding='utf-8').read()
+_noise_ok = ('bse = bse - len(bse_non_bj)' in _src          # 剔除噪声后重算池外
+             and "print('    [已剔除 OCR 噪声代码" in _src   # 剔除要有日志可查
+             and 'tol = max(1, len(pool_codes) // 100)' in _src  # 覆盖率留容差
+             and 'abs(total - (len(pool_codes) + bse)) <= tol' in _src
+             and 'and not bse_non_bj' not in _src)          # 旧的「有一个就判 False」必须已移除
+if _noise_ok:
+    print('\n  [OK] 池外 OCR 噪声代码会真正剔除（不再污染 JSON）+ 覆盖率判定留容差')
+else:
+    print('\n  [FAIL] 池外噪声清理逻辑缺失或被回退（会再次出现「整天数据被误废」）')
+ok = ok and _noise_ok
+
 print('\n自测结论:', '全部通过' if ok else '存在失败项')
 sys.exit(0 if ok else 1)
