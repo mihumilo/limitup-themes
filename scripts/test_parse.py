@@ -509,14 +509,39 @@ _src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'pipeline.p
             encoding='utf-8').read()
 _noise_ok = ('bse = bse - len(bse_non_bj)' in _src          # 剔除噪声后重算池外
              and "print('    [已剔除 OCR 噪声代码" in _src   # 剔除要有日志可查
-             and 'tol = max(1, len(pool_codes) // 100)' in _src  # 覆盖率留容差
+             and 'tol = max(2, round(len(pool_codes) * 0.02))' in _src  # 2% 覆盖率容差
              and 'abs(total - (len(pool_codes) + bse)) <= tol' in _src
              and 'and not bse_non_bj' not in _src)          # 旧的「有一个就判 False」必须已移除
 if _noise_ok:
-    print('\n  [OK] 池外 OCR 噪声代码会真正剔除（不再污染 JSON）+ 覆盖率判定留容差')
+    print('\n  [OK] 池外 OCR 噪声代码会真正剔除（不再污染 JSON）+ 覆盖率判定留 2% 容差')
 else:
     print('\n  [FAIL] 池外噪声清理逻辑缺失或被回退（会再次出现「整天数据被误废」）')
 ok = ok and _noise_ok
+
+# ------------------------------------------------- 缺图检测（2026-09-25）
+# 20260731 池子 98 只却只有 2 张长图（池子 ≥90 的日子实测全部为 3 张，25 天无一例外）
+# → 只识别 64 只、差 35 只。根因是**官方少发一张图**，不是 OCR 也不是判定过严。
+# 没有这条检测时日志只说「差 35 只」，看不出真因，容易被误当成 OCR 崩了去瞎修。
+_short_ok = ("img_shortage = bool(pool_codes) and len(pool_codes) >= 90 and n_img < 3" in _src
+             and '[疑似官方少发图]' in _src                  # 告警要能一眼看出
+             and "'imgShortage': img_shortage" in _src       # 落盘供事后统计
+             # 必须按「官方发了几张」判定，按下载成功数会在单张下载失败时误报
+             and "n_img = len(post.get('imgs') or files)" in _src)
+if _short_ok:
+    print('  [OK] 缺图检测：池子≥90 但长图<3 张时告警并落 imgShortage 标记')
+else:
+    print('  [FAIL] 缺图检测缺失（再遇官方少发图时无法定位真因）')
+ok = ok and _short_ok
+
+# 容差语义回归：2% 容差必须「放行漏 2 只、判死漏 35 只」
+# （旧式 max(1, n//100) 在池子<200 时恒为 1，两者都被判死）
+_tol88 = max(2, round(88 * 0.02))
+_tol98 = max(2, round(98 * 0.02))
+if _tol88 >= 2 and _tol98 <= 2:
+    print('  [OK] 容差语义：漏 2 只(20260612,98.9%覆盖)放行 / 漏 35 只(20260731,65%覆盖)判死')
+else:
+    print('  [FAIL] 容差语义不对：tol(88)=%s tol(98)=%s' % (_tol88, _tol98))
+ok = ok and (_tol88 >= 2 and _tol98 <= 2)
 
 print('\n自测结论:', '全部通过' if ok else '存在失败项')
 sys.exit(0 if ok else 1)

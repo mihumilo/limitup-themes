@@ -1180,8 +1180,22 @@ def run_one(date, force=False, from_ocr=False, locate_only=False, ocr_only=False
         themes = kept
         total = sum(t['count'] for t in themes)
         bse = bse - len(bse_non_bj)          # 剩下的池外都是北交所（预期内）
-    # 容差：OCR 难免漏掉个别行，只要不是成片漏解析就认为可用（100 只以内允许差 1 只）
-    tol = max(1, len(pool_codes) // 100)
+    # ★★ 2026-09-25 缺图检测：官方偶尔少发一张长图 → 覆盖不全。
+    #     实测 88 天：池子 ≥90 的日子 **全部是 3 张图**（25 天无一例外）；
+    #     2 张图的日子池子最大只有 49（中位 44）。
+    #     20260731 池子 98 却只有 2 张 → 只识别 64 只、差 35 只，
+    #     属上游缺数据，OCR 与判定都没问题 —— 日志必须说清真因，否则会被误判成 OCR 崩了。
+    # 用「官方发了几张」而非「下载成功几张」：后者在单张下载失败时会误报成官方少发。
+    n_img = len(post.get('imgs') or files)
+    img_shortage = bool(pool_codes) and len(pool_codes) >= 90 and n_img < 3
+    if img_shortage:
+        print('    [疑似官方少发图] 涨停池 %d 只但仅 %d 张长图（≥90 只时应为 3 张）'
+              '→ 覆盖不全是上游缺数据，非 OCR 问题' % (len(pool_codes), n_img))
+    # 容差：OCR 难免漏掉个别行，只要不是成片漏解析就认为可用。
+    # ★ 2026-09-25 修正：旧式 max(1, len // 100) 在池子 <200 只时恒为 1，
+    #   把「漏 2 只（98.9% 覆盖，20260612）」和「漏 35 只（65% 覆盖，20260731）」一样判死。
+    #   改为按覆盖率 2% 给容差（至少 2 只）：个别漏行放行，成片漏解析照旧判死。
+    tol = max(2, round(len(pool_codes) * 0.02))
     verified = bool(pool_codes) and abs(total - (len(pool_codes) + bse)) <= tol
     # 名称回填：官方图未识别出名称时，用涨停池名称补齐
     for t in themes:
@@ -1191,6 +1205,7 @@ def run_one(date, force=False, from_ocr=False, locate_only=False, ocr_only=False
 
     json.dump({'date': date, 'source': 'ocr', 'verified': verified,
                'total': total, 'poolSize': len(pool_codes), 'bse': bse,
+               'imgShortage': img_shortage,
                'pid': post['pid'], 'publishedAt': post['publishedAt'],
                'themes': themes},
               open(theme_fp, 'w', encoding='utf-8'), ensure_ascii=False)
