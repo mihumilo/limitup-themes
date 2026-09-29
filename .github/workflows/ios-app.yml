@@ -1,0 +1,101 @@
+name: 构建 iOS 应用（Capacitor 壳 → 未签名 ipa）
+
+# ★ 2026-09-29：把涨停复盘看板打包成 iOS 应用。
+#   原理：Capacitor 在 GitHub Actions 的 macOS runner 上创建 iOS 工程，
+#   WKWebView 直接加载 Worker 线上地址（server.url）—— 显示内容与原项目 100% 一致，
+#   数据/登录/图表全部走线上，无本地缓存逻辑。
+#   产物：未签名 ipa（Actions artifact 下载）——
+#   ⚠️ 未签名 ipa 不能直接安装到 iPhone！用户需用 Sideloadly（Windows 可用）
+#   + 自己的 Apple ID 重签后安装（免费 Apple ID 7 天有效可无限续签；
+#   付费开发者账号 688 元/年、签一次 1 年有效）。
+#
+# 触发：
+#   · workflow_dispatch —— 可填真实 Worker 线上地址（构建时烧进 App）
+#   · push（仅当 workflow 文件或图标变化）—— 用默认占位地址跑流水线自检
+on:
+  workflow_dispatch:
+    inputs:
+      worker_url:
+        description: 'Worker 线上地址（https://xxx.workers.dev，留空则用占位地址仅验证流水线）'
+        required: false
+        default: ''
+      app_id:
+        description: 'App Bundle ID（自签时可改）'
+        required: false
+        default: 'com.limitup.themes'
+  push:
+    paths:
+      - '.github/workflows/ios-app.yml'
+      - 'assets/icon-only@1024.png'
+
+permissions:
+  contents: read
+
+jobs:
+  build-ios:
+    runs-on: macos-latest
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 确定 Worker 地址
+        id: url
+        run: |
+          W="${{ github.event.inputs.worker_url }}"
+          if [ -z "$W" ]; then W="https://limitup-themes.example.workers.dev"; fi
+          echo "worker_url=$W" >> $GITHUB_OUTPUT
+          echo "使用 Worker 地址: $W"
+
+      - name: 创建 Capacitor iOS 工程
+        env:
+          WURL: ${{ steps.url.outputs.worker_url }}
+          APPID: ${{ github.event.inputs.app_id }}
+        run: |
+          mkdir -p app && cd app
+          npm init -y >/dev/null
+          npm i @capacitor/core@6 @capacitor/cli@6 @capacitor/ios@6 --silent
+          mkdir -p www
+          cat > www/index.html <<'EOF'
+          <!doctype html><meta charset="utf-8"><title>涨停复盘</title>
+          <body style="font-family:-apple-system,sans-serif;text-align:center;padding-top:40vh;color:#333">
+          正在打开涨停复盘…
+          <script>try{location.replace(window.__WURL__||'/')}catch(e){}</script>
+          </body>
+          EOF
+          npx --yes cap init "涨停复盘" "${APPID:-com.limitup.themes}" --web-dir www
+          # server.url = Worker 线上地址（App 启动即加载线上看板，显示与原项目完全一致）
+          node -e "const fs=require('fs');const c=JSON.parse(fs.readFileSync('capacitor.config.json','utf8'));c.server={url:process.env.WURL,cleartext:false};c.ios={contentInset:'never'};fs.writeFileSync('capacitor.config.json',JSON.stringify(c,null,2));"
+          npx --yes cap add ios
+          npx --yes cap sync ios
+
+      - name: 生成图标与启动屏（assets/icon-only@1024.png）
+        run: |
+          cd app
+          mkdir -p assets
+          cp ../assets/icon-only@1024.png assets/ 2>/dev/null || true
+          npx --yes @capacitor/assets generate --assetPath assets || echo "图标生成失败（不阻塞构建）"
+
+      - name: 构建 ipa（未签名，真机 arm64）
+        run: |
+          cd app/ios/App
+          xcodebuild -workspace App.xcworkspace -scheme App \
+            -configuration Release -sdk iphoneos -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            -quiet
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/App.app Payload/
+          zip -qry "../../limitup-ios-unsigned.ipa" Payload
+          ls -lh ../../limitup-ios-unsigned.ipa
+
+      - name: 上传 ipa（Actions 页 artifact 下载）
+        uses: actions/upload-artifact@v4
+        with:
+          name: limitup-ios-ipa-unsigned
+          path: app/limitup-ios-unsigned.ipa
+          retention-days: 90
+
+      - name: 构建信息
+        run: |
+          echo "Worker 地址: ${{ steps.url.outputs.worker_url }}"
+          echo "产物: artifact「limitup-ios-ipa-unsigned」（Actions 页本次 run 底部下载）"
+          echo "安装: 下载解压得到 ipa → Sideloadly（Windows）+ Apple ID 重签安装"
