@@ -74,10 +74,12 @@ jobs:
 
       # 目标日期（手动触发可指定）。不再区分"第几次"——两次调用的逻辑完全一样，
       # 靠「已有 verified 产出就跳过」来实现"拿到就不跑第二次"。
+      # ★ 2026-09-29：repository_dispatch（Worker 手动/定时触发）可带 client_payload.date ——
+      #   留空=今天北京；填历史日期 = 让 GitHub 回补那一天。
       - name: 确定目标日期
         id: meta
         run: |
-          DATE="${{ github.event.inputs.date }}"
+          DATE="${{ github.event.inputs.date || github.event.client_payload.date }}"
           if [ -z "$DATE" ]; then DATE=$(TZ=Asia/Shanghai date +%Y%m%d); fi
           echo "date=$DATE" >> $GITHUB_OUTPUT
 
