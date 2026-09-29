@@ -144,7 +144,7 @@ struct TrackItem: Codable, Identifiable, Hashable {
     var upCount: Int { upN ?? 0 }
     var lbCount: Int { lbN ?? 0 }
     var downCount: Int { downN ?? 0 }
-    var maxM: Int { top?.m ?? (t?.map(\.m).max() ?? 0) }
+    var maxM: Int { top?.m ?? (t?.compactMap(\.m).max() ?? 0) }
 }
 
 struct TrackTheme: Codable, Hashable {

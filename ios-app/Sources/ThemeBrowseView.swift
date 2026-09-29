@@ -40,7 +40,7 @@ struct ThemeBrowseView: View {
         }
     }
 
-    private func load(forceDay: Bool) async {
+    private func load(forceDay: Bool = false) async {
         if forceDay { await store.loadDay(force: true) }
         state = themes.isEmpty ? .loading : .refreshing
         defer { if case .refreshing = state { state = .loaded } }
@@ -126,7 +126,7 @@ struct ThemeCard: View {
             }
             .buttonStyle(.plain)
             if expanded {
-                ForEach(theme.stocks ?? []) { s in
+                ForEach(theme.stocks ?? [ThemeStock]()) { s in
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Text(s.displayName).font(.subheadline.bold())
                         Text(s.code).font(.caption).foregroundStyle(.secondary)

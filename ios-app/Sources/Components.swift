@@ -1,12 +1,20 @@
 import SwiftUI
 
 // MARK: - 中国市场配色：红涨绿跌
+// 同时扩展 Color 与 ShapeStyle：foregroundStyle(.upRed) 的推断上下文是 ShapeStyle，
+// 只写 Color 扩展会让 .upRed 在 ShapeStyle 上下文里找不到（CI 实测的编译错误）。
 
 extension Color {
     static let upRed = Color(red: 0.85, green: 0.17, blue: 0.17)
     static let downGreen = Color(red: 0.08, green: 0.55, blue: 0.35)
     static let boardOrange = Color(red: 0.82, green: 0.60, blue: 0.13)
     static let cardBg = Color(uiColor: .secondarySystemGroupedBackground)
+}
+
+extension ShapeStyle where Self == Color {
+    static var upRed: Color { .init(red: 0.85, green: 0.17, blue: 0.17) }
+    static var downGreen: Color { .init(red: 0.08, green: 0.55, blue: 0.35) }
+    static var boardOrange: Color { .init(red: 0.82, green: 0.60, blue: 0.13) }
 }
 
 // MARK: - 通用组件
@@ -119,7 +127,10 @@ struct DateMenu: View {
 
     static func label(_ key: String) -> String {
         guard key.count == 8 else { return key.isEmpty ? "选择日期" : key }
-        let m = key.prefix(4) + "-" + key.dropFirst(4).prefix(2) + "-" + key.suffix(2)
+        let year = String(key.prefix(4))
+        let month = String(key.dropFirst(4).prefix(2))
+        let day = String(key.suffix(2))
+        let m = year + "-" + month + "-" + day
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd"
         f.timeZone = TimeZone(secondsFromGMT: 8 * 3600)
@@ -127,11 +138,11 @@ struct DateMenu: View {
             let w = Calendar(identifier: .gregorian)
                 .dateComponents([.weekday], from: date).weekday ?? 1
             let names = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"]
-            let g = Calendar(identifier: .gregorian)
-            if let y = g.dateComponents([.year], from: date).year, y != currentYear() {
+            let y = Int(year) ?? 2026
+            if y != currentYear() {
                 return m + " " + names[w - 1]
             }
-            return String(m.dropFirst(5)) + " " + names[w - 1]
+            return month + "-" + day + " " + names[w - 1]
         }
         return m
     }

@@ -87,7 +87,7 @@ struct LimitUpListView: View {
                     VStack(alignment: .leading, spacing: 6) {
                         Text(groupTitle(h, count: groups[h]?.count ?? 0))
                             .font(.subheadline.bold())
-                            .foregroundStyle(h >= 2 ? .upRed : .secondary)
+                            .foregroundStyle(h >= 2 ? Color.upRed : Color.secondary)
                         ForEach(groups[h] ?? []) { s in
                             StockRow(stock: s)
                         }

@@ -82,11 +82,12 @@ final class AppStore: ObservableObject {
             struct LoginBody: Decodable { let code: Int?; let message: String? }
             let body = try? JSONDecoder().decode(LoginBody.self, from: data)
             if let code = body?.code, code == 0 {
-                // 取 Set-Cookie 里的 lp_auth 值
-                if let cookies = HTTPCookie.cookies(
+                // 取 Set-Cookie 里的 lp_auth 值（HTTPCookie.cookies 返回非可选数组）
+                let cookies = HTTPCookie.cookies(
                     withResponseHeaderFields: http.allHeaderFields as? [String: String] ?? [:],
                     for: url
-                ), let auth = cookies.first(where: { $0.name == "lp_auth" }) {
+                )
+                if let auth = cookies.first(where: { $0.name == "lp_auth" }) {
                     authCookie = auth.value
                     passwordFree = false
                 } else {

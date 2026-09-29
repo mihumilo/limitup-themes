@@ -133,7 +133,7 @@ struct OverviewView: View {
                     }
                 }
                 .chartForegroundStyleScale([
-                    "涨停": .upRed, "连板": .boardOrange, "跌停": .downGreen
+                    "涨停": Color.upRed, "连板": Color.boardOrange, "跌停": Color.downGreen
                 ])
                 .frame(height: 180)
 
