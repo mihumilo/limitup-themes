@@ -17,10 +17,18 @@ name: 每日官方复盘转录
 #   scheduled 事件被排队 3~6 小时 —— 实际跑成北京 21:18~22:54 而不是 16:30/18:00，
 #   官方复盘帖 15:30~16:30 就发了，等到晚上才抓等于白等一天。
 #   Actions 文档明确写了高峰期可能延迟数小时。改成冷门分钟（23 分 / 53 分）后基本准点。
+#
+# ★★ 2026-09-29 定性：schedule 是「尽力而为」调度，调分钟无法根治 ——
+#   实测 09-23~09-28 排队 3.5h→8h 且持续恶化（09-28 的 09:53 事件 17:49 才跑，
+#   北京已是第二天凌晨 01:49，目标日期还错成第二天）。主路径改为 Cloudflare Worker
+#   的准点 Cron Trigger 调 repository_dispatch（本文件的 types: daily-transcribe），
+#   1 分钟内启动；下面的 schedule 仅作兜底（重复跑幂等：当天已 verified 会自动跳过）。
 on:
   schedule:
-    - cron: '23 8 * * *'      # UTC 08:23 = 北京 16:23
-    - cron: '53 9 * * *'      # UTC 09:53 = 北京 17:53
+    - cron: '23 8 * * *'      # UTC 08:23 = 北京 16:23（兜底；主路径 = Worker 的 repository_dispatch）
+    - cron: '53 9 * * *'      # UTC 09:53 = 北京 17:53（兜底）
+  repository_dispatch:
+    types: [daily-transcribe] # ★ Worker cron（北京 16:30/18:00）准点触发
   workflow_dispatch:
     inputs:
       date:
