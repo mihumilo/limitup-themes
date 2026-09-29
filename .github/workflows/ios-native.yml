@@ -1,0 +1,62 @@
+name: 构建 iOS 原生应用（SwiftUI → 未签名 ipa）
+
+# ★ 2026-09-29：涨停复盘 iPhone 原生客户端（SwiftUI + Swift Charts，iOS 16+）。
+#   直连 Cloudflare Worker API：/api/login（Cookie 鉴权）、/api/data、/api/days、
+#   /api/board-track、/api/themes —— 不打包 WebView，界面为原生 SwiftUI。
+#   服务器地址在 App 内「登录页」填写（存 UserDefaults），无需构建时烧录。
+#   产物：未签名 ipa（artifact 下载）→ Sideloadly（Windows）+ Apple ID 重签安装。
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: '版本备注（仅记录用）'
+        required: false
+        default: ''
+  push:
+    paths:
+      - 'ios-app/**'
+      - '.github/workflows/ios-native.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build-native-ios:
+    runs-on: macos-latest
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 安装 xcodegen（由 project.yml 生成 Xcode 工程）
+        run: brew install xcodegen
+
+      - name: 生成 Xcode 工程
+        run: |
+          cd ios-app
+          xcodegen generate
+          ls -la LimitUp.xcodeproj
+
+      - name: 构建 ipa（未签名，真机 arm64）
+        run: |
+          cd ios-app
+          xcodebuild -project LimitUp.xcodeproj -scheme LimitUp \
+            -configuration Release -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            -quiet
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/LimitUp.app Payload/
+          zip -qry limitup-native-unsigned.ipa Payload
+          ls -lh limitup-native-unsigned.ipa
+
+      - name: 上传 ipa（Actions 页 artifact 下载）
+        uses: actions/upload-artifact@v4
+        with:
+          name: limitup-ios-native-unsigned
+          path: ios-app/limitup-native-unsigned.ipa
+          retention-days: 90
+
+      - name: 构建信息
+        run: |
+          echo "产物: artifact「limitup-ios-native-unsigned」"
+          echo "安装: 下载 ipa → Sideloadly（Windows）+ Apple ID 重签 → iPhone"
