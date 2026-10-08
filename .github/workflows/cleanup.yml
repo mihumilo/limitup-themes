@@ -26,9 +26,11 @@ jobs:
       # themes/ 与 review/ 里每个文件就是一天，按文件名（日期）排序取后 N 个即可 ——
       # 比用自然日倒数（30 交易日 ≈ 42 自然日）更准，也不会因节假日误删。
       - name: 保留最近 N 个交易日
+        id: keep
         run: |
           KEEP="${{ github.event.inputs.keep }}"
           if [ -z "$KEEP" ]; then KEEP=90; fi
+          echo "value=$KEEP" >> $GITHUB_OUTPUT
           echo "保留最近 $KEEP 个交易日"
           for d in themes review; do
             [ -d "$d" ] || continue
@@ -52,7 +54,10 @@ jobs:
           if git diff --cached --quiet; then
             echo "无变化"
           else
-            git commit -m "chore: 清理历史 JSON（保留最近 $KEEP 个交易日）$(TZ=Asia/Shanghai date +%Y-%m-%d)"
+            # ★ 用 steps.keep.outputs.value（已在步骤内兜底成 90），不要直接用
+            #   ${{ github.event.inputs.keep }} —— repository_dispatch 触发时 inputs 为空，
+            #   会出现「保留最近  个交易日」这种空数字的提交信息（2026-10-08 实测）。
+            git commit -m "chore: 清理历史 JSON（保留最近 ${{ steps.keep.outputs.value }} 个交易日）$(TZ=Asia/Shanghai date +%Y-%m-%d)"
             # 与 daily/backfill 一致：推送失败重试（并发运行时 origin 可能已经前移）
             for i in 1 2 3; do
               git pull --rebase origin main && git push && break
