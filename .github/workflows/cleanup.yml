@@ -1,14 +1,8 @@
 name: 清理历史 JSON（保留最近 N 个交易日）
 
 on:
-  schedule:
-    # 北京时间 20:00（UTC 12:00），**每天**执行（含周末）——
-    # 放在「每日官方复盘转录」两次拉取（16:30 / 18:00）之后，避免删掉刚拉好的数据；
-    # 清理本身不依赖交易日，所以不必限工作日（早期限了 1-5，导致周六上午还留着周五的 JSON）。
-    # ★ 2026-09-29：schedule 实测排队 6.8h（12:00 的事件 18:49 才跑）→ 降级为兜底；
-    #   主路径 = Worker 北京 18:00 的 cron 调 repository_dispatch（清理提前到 18 点后跑：
-    #   当天转录 16:32 左右已完成，删的是 90 天外的旧文件，互不冲突）。
-    - cron: '0 12 * * *'
+  # ★ 2026-09-29：schedule（UTC 12:00 兜底）按用户要求删除 —— 唯一自动入口是
+  #   Cloudflare Worker 北京 18:00 的准点 Cron 调 repository_dispatch。
   repository_dispatch:
     types: [cleanup-json]     # ★ Worker cron（北京 18:00）准点触发
   workflow_dispatch:

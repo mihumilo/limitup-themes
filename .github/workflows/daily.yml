@@ -12,21 +12,13 @@ name: 每日官方复盘转录
 #
 # cron 写「每天」而不是 1-5：省得漏掉调休上班的周六/周日。
 #
-# ★★ 分钟数必须避开整点/半点（2026-09-28 修）：
-#   以前写 '30 8' / '0 10'，是 GitHub 上**最拥挤**的两个时刻，
-#   scheduled 事件被排队 3~6 小时 —— 实际跑成北京 21:18~22:54 而不是 16:30/18:00，
-#   官方复盘帖 15:30~16:30 就发了，等到晚上才抓等于白等一天。
-#   Actions 文档明确写了高峰期可能延迟数小时。改成冷门分钟（23 分 / 53 分）后基本准点。
-#
-# ★★ 2026-09-29 定性：schedule 是「尽力而为」调度，调分钟无法根治 ——
-#   实测 09-23~09-28 排队 3.5h→8h 且持续恶化（09-28 的 09:53 事件 17:49 才跑，
-#   北京已是第二天凌晨 01:49，目标日期还错成第二天）。主路径改为 Cloudflare Worker
-#   的准点 Cron Trigger 调 repository_dispatch（本文件的 types: daily-transcribe），
-#   1 分钟内启动；下面的 schedule 仅作兜底（重复跑幂等：当天已 verified 会自动跳过）。
+# ★★ 2026-09-28/29 定时触发器根治：GitHub 的 schedule 是共享池「尽力而为」调度，
+#   实测排队 3.5~8 小时且持续恶化（09-28 的 09:53 事件 17:49 才跑，北京已是第二天凌晨，
+#   目标日期还错成第二天），**已按用户要求彻底删除 schedule**。
+#   唯一自动入口 = Cloudflare Worker 的准点 Cron Trigger 调 repository_dispatch
+#   （types: daily-transcribe）：北京 16:30 / 18:00 两次，秒级准点，
+#   触发前 Worker 还会先查 KV（该日官方主题已存在就跳过），重复触发也幂等。
 on:
-  schedule:
-    - cron: '23 8 * * *'      # UTC 08:23 = 北京 16:23（兜底；主路径 = Worker 的 repository_dispatch）
-    - cron: '53 9 * * *'      # UTC 09:53 = 北京 17:53（兜底）
   repository_dispatch:
     types: [daily-transcribe] # ★ Worker cron（北京 16:30/18:00）准点触发
   workflow_dispatch:

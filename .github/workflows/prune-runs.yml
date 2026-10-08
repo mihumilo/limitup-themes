@@ -1,0 +1,63 @@
+name: 清理 Actions 历史记录（保留最近 2 天）
+
+# ★ 2026-10-08（用户要求）：Actions 记录堆得太多，隔日自动清掉前一天的。
+#   · 每天 03:17 UTC（北京 11:17）跑一次 —— 避开整点高峰，且这个时间点与
+#     Worker 的 16:30/18:00 转录 dispatch（对应 GitHub 侧的 run）完全错开，
+#     不会把当天正在跑的记录删掉。
+#   · 阈值取「前天 00:00 UTC」：保留今天 + 昨天共两天，删除更早的全部 run。
+#     用「前天」而不是「昨天」是为了避开时区边界（北京时间 08:00 前 UTC 还在前一天），
+#     万一手动触发也不会误删昨天的数据。
+#   · 删除 run 会连带删除它的 artifacts（GitHub 官方行为），OCR 原始数据等上传物一起清掉。
+#   · 本仓库的转录/清理 workflow 已无 schedule（唯一自动入口 = Worker 的准点 dispatch），
+#     所以这个「记录清理」是**仅存的定时任务**。
+#
+# 手动触发时可用 input 自定义保留天数：
+#   keep_days = 1  → 只保留今天（更激进）；默认 2。
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      keep_days:
+        description: '保留最近几天（默认 2，即删除更早的全部记录）'
+        required: false
+        default: '2'
+
+permissions:
+  actions: write      # 删除 run 需要
+  contents: read
+
+concurrency:
+  group: prune-actions-runs
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 删除超过保留期的 workflow runs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KEEP: ${{ github.event.inputs.keep_days || '2' }}
+        run: |
+          set -uo pipefail
+          REPO="${{ github.repository }}"
+          CUTOFF=$(date -u -d "${KEEP} days ago" +%Y-%m-%dT%H:%M:%SZ)
+          echo "保留最近 ${KEEP} 天，删除 ${CUTOFF} 之前的 run（仓库 ${REPO}）"
+          IDS=$(gh api --paginate "repos/${REPO}/actions/runs?per_page=100" \
+                --jq ".workflow_runs[] | select(.created_at < \"${CUTOFF}\") | .id")
+          if [ -z "$IDS" ]; then
+            echo "没有需要删除的记录"
+            exit 0
+          fi
+          N=0; FAIL=0
+          for id in $IDS; do
+            if gh api -X DELETE "repos/${REPO}/actions/runs/${id}" >/dev/null 2>&1; then
+              N=$((N+1))
+            else
+              FAIL=$((FAIL+1))
+              echo "删除失败 run ${id}"
+            fi
+            sleep 0.3          # 轻度限速，别把 API 打满
+          done
+          echo "已删除 ${N} 条历史 run（失败 ${FAIL}）"
